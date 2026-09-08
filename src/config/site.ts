@@ -3,6 +3,32 @@
  * No component may hardcode any of these values.
  */
 
+/**
+ * The site's absolute base URL. ALWAYS a valid, parseable URL.
+ *
+ * `process.env.NEXT_PUBLIC_SITE_URL ?? fallback` was wrong and broke the first
+ * Vercel build. Next inlines NEXT_PUBLIC_* variables at build time, and an unset
+ * one becomes the empty STRING rather than undefined — so `??` never fires,
+ * layout.tsx evaluated `new URL('')`, and the build died at module load with
+ * ERR_INVALID_URL before a single page was collected.
+ *
+ * So: treat empty and whitespace as absent, and fall back through Vercel's own
+ * deployment URL before giving up on localhost. That means a fresh import with
+ * no environment variables configured still builds AND still produces correct
+ * absolute URLs in metadata and emails.
+ */
+function resolveSiteUrl(): string {
+  const explicit = process.env.NEXT_PUBLIC_SITE_URL?.trim()
+  if (explicit) return explicit.replace(/\/+$/, '')
+
+  // Vercel injects this for every deployment (host only, no protocol).
+  const vercel =
+    process.env.NEXT_PUBLIC_VERCEL_URL?.trim() || process.env.VERCEL_URL?.trim()
+  if (vercel) return `https://${vercel.replace(/^https?:\/\//, '').replace(/\/+$/, '')}`
+
+  return 'http://localhost:3000'
+}
+
 export const siteConfig = {
   name: 'Redkido',
   legalName: 'Redkido Consultancy',
@@ -11,7 +37,7 @@ export const siteConfig = {
   description:
     'Redkido runs your content, social, video, events, performance marketing, automation and more — one accountable team, not eleven vendors.',
 
-  url: process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000',
+  url: resolveSiteUrl(),
 
   contact: {
     email: 'hello@redkido.com',

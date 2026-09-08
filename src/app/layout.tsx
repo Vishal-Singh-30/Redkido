@@ -17,8 +17,21 @@ import './globals.css'
 const FONT_CSS_HREF =
   'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Sora:wght@500;600;700;800&display=swap'
 
+function safeMetadataBase(url: string): URL | undefined {
+  try {
+    return new URL(url)
+  } catch {
+    console.warn(`[layout] NEXT_PUBLIC_SITE_URL is not a valid URL (${JSON.stringify(url)}); omitting metadataBase`)
+    return undefined
+  }
+}
+
 export const metadata: Metadata = {
-  metadataBase: new URL(siteConfig.url),
+  // Defensive: metadata is evaluated at module load, so anything that throws
+  // here takes down the whole build before any page is rendered. resolveSiteUrl()
+  // should make this impossible, but a bad value in an env var must degrade to
+  // relative URLs rather than a failed deployment.
+  metadataBase: safeMetadataBase(siteConfig.url),
   title: {
     default: siteConfig.title,
     template: `%s — ${siteConfig.name}`,
