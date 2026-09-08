@@ -140,6 +140,13 @@ const ctaStyle: CSSProperties = {
 }
 
 export function Header() {
+  /**
+   * Mobile panel open state.
+   *
+   * It also suppresses the scrolled "island" header: the panel is a full-width
+   * sheet with a top border, and hanging it off a floating rounded pill leaves
+   * it visibly detached. The flush bar is what it is designed to attach to.
+   */
   const [open, setOpen] = useState(false)
   const [scrolled, setScrolled] = useState(false)
   const [activeId, setActiveId] = useState<string | null>(null)
@@ -245,7 +252,7 @@ export function Header() {
     : navStyleBase
 
   return (
-    <header data-scrolled={scrolled ? 'true' : undefined} style={headerStyle}>
+    <header data-scrolled={scrolled && !open ? 'true' : undefined} style={headerStyle}>
       <nav style={navStyle}>
         <NavAnchor href={navBrandHref} pathname={pathname} className="logo">
           <span className="dot" />
