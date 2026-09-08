@@ -1,0 +1,190 @@
+// Prisma 7: no `url` here. The connection string is supplied by the driver
+// adapter configured in prisma.config.ts.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum LeadKind {
+  ENQUIRY
+  CONSULTATION
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  WON
+  LOST
+}
+
+enum SlotStatus {
+  AVAILABLE
+  /// Reserved by a PENDING booking, but only until that booking's holdExpiresAt.
+  /// An abandoned checkout must not make a slot permanently unsellable.
+  HELD
+  BOOKED
+  BLOCKED
+}
+
+enum BookingStatus {
+  PENDING
+  PAID
+  FAILED
+  CANCELLED
+  REFUNDED
+}
+
+model Admin {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  createdAt    DateTime @default(now())
+}
+
+/// Catalogue of paid consultation types. `pricePaise` is the ONLY authority on
+/// price; the marketing page and the checkout API both read it through
+/// src/lib/pricing.ts. Never accept a price from a request body.
+model ConsultationType {
+  id           String    @id @default(cuid())
+  slug         String    @unique
+  name         String
+  summary      String
+  durationMins Int
+  pricePaise   Int
+  active       Boolean   @default(true)
+  sortOrder    Int       @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  slots        Slot[]
+  bookings     Booking[]
+}
+
+/// A bookable time slot. This is the row locked FOR UPDATE during checkout —
+/// the consultancy equivalent of a capacity check. The constraint is binary
+/// ("this slot is taken"), not a remaining count.
+model Slot {
+  id                 String            @id @default(cuid())
+  startsAt           DateTime
+  endsAt             DateTime
+  status             SlotStatus        @default(AVAILABLE)
+  consultationTypeId String?
+  consultationType   ConsultationType? @relation(fields: [consultationTypeId], references: [id], onDelete: SetNull)
+  /// Many bookings may reference a slot over time (a failed attempt, then a
+  /// retry). At most ONE may be PAID — enforced by a partial unique index in
+  /// the migration, because a Razorpay order stays payable after a failure and
+  /// deleting the earlier booking would orphan a late capture.
+  bookings           Booking[]
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  @@unique([startsAt, consultationTypeId])
+  @@index([status, startsAt])
+}
+
+/// Unified admin list for BOTH funnels. `kind` tags which one.
+/// ENQUIRY rows have no booking; CONSULTATION rows have exactly one.
+model Lead {
+  id        String     @id @default(cuid())
+  kind      LeadKind
+  status    LeadStatus @default(NEW)
+  name      String
+  email     String
+  phone     String?
+  company   String?
+  message   String?
+  source    String?
+  notes     String?
+  booking   Booking?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  @@index([kind, createdAt])
+  @@index([status])
+  @@index([email])
+}
+
+/// All amounts are INTEGER PAISE. Never a float anywhere near a payment.
+/// Invariant enforced by src/lib/tax.ts: taxablePaise + taxTotalPaise == totalPaise
+model Booking {
+  id                 String           @id @default(cuid())
+  leadId             String           @unique
+  lead               Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  slotId             String
+  slot               Slot             @relation(fields: [slotId], references: [id])
+  consultationTypeId String
+  consultationType   ConsultationType @relation(fields: [consultationTypeId], references: [id])
+
+  status BookingStatus @default(PENDING)
+
+  // ---- money (paise) ----
+  totalPaise   Int
+  taxablePaise Int
+  cgstPaise    Int @default(0)
+  sgstPaise    Int @default(0)
+  igstPaise    Int @default(0)
+  gstRatePercent Int
+  sacCode        String
+
+  // ---- place of supply (IGST Act s.12(2)) ----
+  placeOfSupplyStateCode String
+  clientStateCode        String?
+  clientGstin            String?
+  isInterState           Boolean
+
+  // ---- gateway ----
+  razorpayOrderId   String  @unique
+  razorpayPaymentId String? @unique
+  razorpaySignature String?
+
+  // ---- idempotency claims: each set exactly once via UPDATE ... WHERE <col> IS NULL ----
+  paidAt                  DateTime?
+  invoiceNumber           String?   @unique
+  invoiceFy               String?
+  confirmationEmailSentAt DateTime?
+  reminderEmailSentAt     DateTime?
+  ownerAlertSentAt        DateTime?
+
+  /// A PENDING booking holds its slot only until this instant. Past it, another
+  /// checkout may reclaim the slot. Cleared once the booking is PAID.
+  holdExpiresAt DateTime?
+
+  /// Set when a payment was captured for a slot that another PAID booking had
+  /// already taken. The money is real, so the booking is still PAID — but it is
+  /// flagged for a human to reschedule rather than silently double-booked.
+  slotConflict Boolean @default(false)
+
+  /// Google Calendar event that carries the Meet conference. Claimed once via
+  /// UPDATE ... WHERE "googleEventId" IS NULL so the webhook and the browser
+  /// callback cannot create two events for one booking.
+  googleEventId String?
+  meetingUrl      String?
+  rescheduleCount Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([slotId])
+}
+
+/// Webhook de-duplication. Razorpay retries; the browser callback races it.
+model WebhookEvent {
+  id          String    @id @default(cuid())
+  eventId     String    @unique
+  event       String
+  payload     Json
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+}
+
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
