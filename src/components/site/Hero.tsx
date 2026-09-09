@@ -75,16 +75,6 @@ export function Hero() {
         wrapClassName="hero-visual"
         trackClassName="hero-track"
         trackId="heroTrack"
-        /*
-         * CSS marquee, not WebGL, and deliberately so.
-         *
-         * The hero already runs the gradient canvas. Putting a second WebGL
-         * context immediately below it means two renderers competing while both
-         * are on screen — at the exact moment the hero has to look its best. The
-         * portfolio section below gets the WebGL gallery; up here the budget
-         * belongs to the gradient.
-         */
-        webgl={false}
       />
       <Reveal className="wrap hero-inner" style={{ paddingTop: '8px' }} delay={STEP * 4}>
         <div className="avatar-row">
