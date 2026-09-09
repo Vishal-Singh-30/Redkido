@@ -62,8 +62,11 @@
   .noise{position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.035;
     background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");}
 
-  header{position:sticky;top:0;z-index:50;backdrop-filter:blur(14px);background:rgba(255,255,255,.78);border-bottom:1px solid var(--line);}
-  nav{display:flex;align-items:center;justify-content:space-between;padding:18px 28px;max-width:var(--maxw);margin:0 auto;}
+  /* Scoped to .site-header (was a bare `header`). The source HTML had exactly
+     one header; the app now has an admin shell whose cards each title
+     themselves with <header>, and a bare selector captured every one. */
+  .site-header{position:sticky;top:0;z-index:50;backdrop-filter:blur(14px);background:rgba(255,255,255,.78);border-bottom:1px solid var(--line);}
+  .site-header nav{display:flex;align-items:center;justify-content:space-between;padding:18px 28px;max-width:var(--maxw);margin:0 auto;}
   .logo{display:flex;align-items:center;gap:9px;font-family:'Sora',sans-serif;font-weight:800;font-size:20px;}
   .logo .dot{width:9px;height:9px;background:var(--red);border-radius:50%;box-shadow:0 0 14px var(--red);}
   .nav-links{display:flex;gap:32px;}
@@ -103,7 +106,10 @@
   .marquee span::after{content:'';width:6px;height:6px;background:var(--red);border-radius:50%;}
   @keyframes scroll{from{transform:translateX(0);}to{transform:translateX(-50%);}}
 
-  section{padding:104px 0;border-bottom:1px solid var(--line);position:relative;}
+  /* Scoped: a bare `section` gave every admin card 104px of top padding and an
+     unwanted bottom border. The admin has no .site-header, so this now reaches
+     only the marketing pages and /book, which is where it was ever meant. */
+  .site-header ~ main section{padding:104px 0;border-bottom:1px solid var(--line);position:relative;}
   .kicker{display:flex;align-items:center;justify-content:center;gap:9px;color:var(--amber);font-size:14px;font-weight:600;font-family:'Sora',sans-serif;margin-bottom:16px;}
   .sec-head-c{text-align:center;max-width:680px;margin:0 auto 56px;}
   .sec-head-c h2{font-size:clamp(30px,4vw,46px);}
@@ -221,7 +227,7 @@
   .cta-box p{font-size:17.5px;color:var(--muted);margin-bottom:36px;}
   .cta-actions{display:flex;gap:14px;flex-wrap:wrap;justify-content:center;}
 
-  footer{padding:64px 0 34px;}
+  .site-header ~ footer{padding:64px 0 34px;}
   .foot-top{display:grid;grid-template-columns:1.4fr repeat(3,1fr);gap:40px;margin-bottom:56px;}
   .foot-brand p{color:var(--muted);font-size:14.5px;margin:16px 0 22px;max-width:32ch;}
   .foot-social{display:flex;gap:10px;}
@@ -388,7 +394,7 @@
      simply overridden here.
      ========================================================================== */
 
-  header{
+  .site-header{
     /*
       FIXED, not sticky.
       A sticky header still occupies its height in normal flow, so the hero
@@ -414,15 +420,15 @@
     exception — it deliberately runs UNDER the header and pads its own content
     clear of it, so the gradient is full-bleed from the very top of the page.
   */
-  main{padding-top:var(--header-h);}
-  main:has(> .hero:first-child){padding-top:0;}
-  main:has(> .hero:first-child) > .hero{
+  .site-header ~ main{padding-top:var(--header-h);}
+  .site-header ~ main:has(> .hero:first-child){padding-top:0;}
+  .site-header ~ main:has(> .hero:first-child) > .hero{
     /* Original spacing preserved: the old 86px bar + 100px hero padding put the
        eyebrow 186px down, and this reproduces that from a y=0 start. */
     padding-top:calc(var(--header-h) + 88px);
   }
 
-  nav{
+  .site-header nav{
     /* Aligned to --maxw so the pill sits on the same column as the content
        beneath it rather than floating at an unrelated width. */
     max-width:min(var(--maxw), calc(100% - 40px));
@@ -461,8 +467,8 @@
   .nav-links a{padding:6px 2px;border-radius:8px;}
 
   @media(max-width:860px){
-    header{padding:10px 0;}
-    nav{
+    .site-header{padding:10px 0;}
+    .site-header nav{
       padding:9px 10px 9px 16px;
       max-width:calc(100% - 20px);
     }

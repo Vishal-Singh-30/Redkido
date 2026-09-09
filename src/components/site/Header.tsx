@@ -206,7 +206,7 @@ export function Header() {
 
 
   return (
-    <header>
+    <header className="site-header">
       <nav>
         <NavAnchor href={navBrandHref} pathname={pathname} className="logo">
           <span className="dot" />

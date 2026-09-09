@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Redkido">
+  <!--
+    Favicon: the brand mark from the header logo — "● Redkido".
+
+    Inverted on purpose. The logo is a red dot on the site's off-white page, but
+    a light tile disappears into a browser's tab strip. A saturated red tile with
+    the dot knocked out in white holds its shape at 16px, which is the only size
+    that actually matters here.
+
+    Geometry only, no text: an SVG favicon carrying <text> is at the mercy of
+    whatever font the browser substitutes, and the mark would render differently
+    everywhere. Two shapes render identically at every size.
+
+    Colours are --red-2 / --red / --red-deep from globals.css.
+  -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff5d47"/>
+      <stop offset="0.55" stop-color="#e8362b"/>
+      <stop offset="1" stop-color="#a8241c"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="116" fill="url(#tile)"/>
+  <circle cx="256" cy="256" r="132" fill="#ffffff"/>
+</svg>
