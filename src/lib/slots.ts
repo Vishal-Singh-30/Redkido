@@ -318,11 +318,6 @@ function toAvailableDay(date: string, count: number): AvailableDay {
   }
 }
 
-/** Public: the same day labels the strip uses, for a date the caller already has. */
-export function describeSessionDate(date: string): AvailableDay | null {
-  return isSessionDate(date) ? toAvailableDay(date, 0) : null
-}
-
 function toAvailableSlot(row: {
   id: string
   startsAt: Date
