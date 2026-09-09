@@ -41,9 +41,9 @@ export const siteConfig = {
 
   contact: {
     email: 'hello@redkido.com',
-    // TODO(go-live): replace with the real number. Placeholder inherited from the
-    // source HTML; wa.me needs a country-coded number with no +, spaces or dashes.
-    whatsapp: '910000000000',
+    // wa.me needs a country-coded number with no +, spaces or dashes.
+    // 91 = India, then the 10-digit mobile.
+    whatsapp: '918796558875',
   },
 
   social: {
