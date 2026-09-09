@@ -43,12 +43,6 @@ const PANEL_ID = 'site-mobile-menu'
 const DESKTOP_QUERY = '(min-width: 861px)'
 const REDUCED_QUERY = '(prefers-reduced-motion: reduce)'
 
-/** Scroll past this many pixels and the bar condenses. */
-const CONDENSE_AT = 40
-
-/** 18px in the stylesheet; 13px condensed. Felt, not watched. */
-const CONDENSED_PAD = 13
-
 /** Section counts as active once it sits in the band under the header. */
 const SPY_ROOT_MARGIN = '-40% 0px -55% 0px'
 
@@ -96,20 +90,18 @@ function NavAnchor({ href, pathname, className, style, active, onClick, children
   )
 }
 
-const headerStyleBase: CSSProperties = {
-  transition: 'box-shadow .5s var(--ease-out-soft)',
-}
-
-const navStyleBase: CSSProperties = {
-  transition: 'padding-top .5s var(--ease-out-soft), padding-bottom .5s var(--ease-out-soft)',
-}
-
+/**
+ * The header has ONE appearance at every scroll position — see the header block
+ * at the end of globals.css. It previously condensed on scroll from here as
+ * well, via inline padding, which both fought the stylesheet (inline styles
+ * win) and produced the thing the client objected to: a bar that presents
+ * itself one way and then re-presents itself a moment later.
+ *
+ * The panel's shape now comes from the .nav-panel class so it matches the pill
+ * above it; only its open/closed state is decided here.
+ */
 const panelBaseStyle: CSSProperties = {
-  maxWidth: 'var(--maxw)',
-  margin: '0 auto',
-  padding: '6px 28px 22px',
-  borderTop: '1px solid var(--line)',
-  background: 'var(--bg)',
+  padding: '14px 22px 20px',
 }
 
 const listStyle: CSSProperties = {
@@ -143,12 +135,8 @@ export function Header() {
   /**
    * Mobile panel open state.
    *
-   * It also suppresses the scrolled "island" header: the panel is a full-width
-   * sheet with a top border, and hanging it off a floating rounded pill leaves
-   * it visibly detached. The flush bar is what it is designed to attach to.
    */
   const [open, setOpen] = useState(false)
-  const [scrolled, setScrolled] = useState(false)
   const [activeId, setActiveId] = useState<string | null>(null)
   const buttonRef = useRef<HTMLButtonElement>(null)
   const pathname = usePathname()
@@ -217,43 +205,10 @@ export function Header() {
     return () => observer.disconnect()
   }, [pathname, sectionIds])
 
-  /* Condense on scroll. window.scrollY costs no layout read, and the rAF gate
-     means at most one state write per frame. Skipped entirely under
-     prefers-reduced-motion so the header keeps its authored proportions. */
-  useEffect(() => {
-    if (window.matchMedia(REDUCED_QUERY).matches) return
-
-    let frame = 0
-
-    function apply() {
-      frame = 0
-      setScrolled(window.scrollY > CONDENSE_AT)
-    }
-
-    function onScroll() {
-      if (frame !== 0) return
-      frame = window.requestAnimationFrame(apply)
-    }
-
-    apply()
-    window.addEventListener('scroll', onScroll, { passive: true })
-    return () => {
-      window.removeEventListener('scroll', onScroll)
-      if (frame !== 0) window.cancelAnimationFrame(frame)
-    }
-  }, [])
-
-  const headerStyle: CSSProperties = scrolled
-    ? { ...headerStyleBase, boxShadow: '0 12px 30px -26px rgba(17,17,17,.55)' }
-    : headerStyleBase
-
-  const navStyle: CSSProperties = scrolled
-    ? { ...navStyleBase, paddingTop: CONDENSED_PAD, paddingBottom: CONDENSED_PAD }
-    : navStyleBase
 
   return (
-    <header data-scrolled={scrolled && !open ? 'true' : undefined} style={headerStyle}>
-      <nav style={navStyle}>
+    <header>
+      <nav>
         <NavAnchor href={navBrandHref} pathname={pathname} className="logo">
           <span className="dot" />
           {navBrandLabel}
@@ -294,7 +249,11 @@ export function Header() {
           <Icon name="menu" />
         </button>
       </nav>
-      <div id={PANEL_ID} style={{ ...panelBaseStyle, display: open ? 'block' : 'none' }}>
+      <div
+        id={PANEL_ID}
+        className="nav-panel"
+        style={{ ...panelBaseStyle, display: open ? 'block' : 'none' }}
+      >
         <ul style={listStyle}>
           {navLinks.map((link) => (
             <li key={link.href} style={itemStyle}>

@@ -287,7 +287,11 @@
      ========================================================================== */
 
   :root{
-    --header-h:78px;
+    /* Actual rendered height of the floating header: 14px inset top and bottom
+       plus the 69px pill. Anchor targets are offset by this, so if the header's
+       padding or the pill's padding changes, change this too — otherwise every
+       in-page jump parks the section heading underneath the nav. */
+    --header-h:98px;
     --ease-out-soft:cubic-bezier(.22,.61,.36,1);
   }
 
@@ -371,63 +375,54 @@
   html.lenis.lenis-smooth iframe{pointer-events:none;}
 
   /* ==========================================================================
-     Header: flush bar at the top, floating island once you scroll.
-     Appended layer — the verbatim header/nav rules above are untouched, and
-     everything here is driven by header[data-scrolled], which Header.tsx sets.
+     Header: a floating island, ALWAYS.
+
+     It used to start as a flush full-bleed bar and contract into a pill on
+     scroll. Two problems with that: the page announced itself one way and then
+     re-announced itself another a second later, and a sticky element whose
+     height changes shoves every pixel below it. So there is now exactly one
+     header, in one state, at every scroll position — which is also why none of
+     these rules are transitioned.
+
+     Appended layer: the verbatim header/nav rules above are untouched and
+     simply overridden here.
      ========================================================================== */
 
   header{
-    padding:0;
-    transition:background .38s var(--ease-out-soft),
-               border-color .38s var(--ease-out-soft),
-               padding .40s var(--ease-out-soft),
-               backdrop-filter .38s var(--ease-out-soft);
-  }
-
-  /* Scrolled: the full-width bar dissolves and the nav itself becomes the
-     surface, so the page reads as content on paper rather than content under
-     a permanent chrome strip. */
-  header[data-scrolled="true"]{
+    /* The float inset. Constant, so the header's height never changes and the
+       page below it never moves. */
+    padding:14px 0;
+    /* The full-bleed bar is gone; the nav itself is the only surface. */
     background:transparent;
     border-bottom-color:transparent;
     backdrop-filter:none;
   }
 
   nav{
-    border:1px solid transparent;
-    border-radius:0;
-    transition:max-width .40s var(--ease-out-soft),
-               padding .40s var(--ease-out-soft),
-               background .40s var(--ease-out-soft),
-               border-color .40s var(--ease-out-soft),
-               border-radius .40s var(--ease-out-soft),
-               box-shadow .40s var(--ease-out-soft);
-  }
-
-  /*
-    Height is preserved EXACTLY, and by construction rather than by arithmetic.
-    The header is sticky, so it occupies real space in flow — if its height
-    changes when the island appears, every pixel of the page below jumps.
-
-    The trick: whatever vertical padding the nav gives up, the header takes on.
-      flush  = 0  (header) + 18 (nav) ... = 18 per side
-      island = 9  (header) +  9 (nav) ... = 18 per side
-    The nav's 1px transparent border and the header's 1px bottom border are
-    present in BOTH states (only their colour changes), so they cancel too.
-  */
-  header[data-scrolled="true"]{
-    padding:9px 0;
-  }
-
-  header[data-scrolled="true"] nav{
-    padding:9px 14px 9px 22px;
-    max-width:min(1080px, calc(100% - 32px));
+    /* Aligned to --maxw so the pill sits on the same column as the content
+       beneath it rather than floating at an unrelated width. */
+    max-width:min(var(--maxw), calc(100% - 40px));
+    padding:10px 14px 10px 22px;
+    border:1px solid var(--line);
     border-radius:100px;
     background:rgba(255,255,255,.82);
     backdrop-filter:blur(16px) saturate(140%);
-    border-color:var(--line);
     box-shadow:0 14px 38px -20px rgba(20,10,10,.38),
                0 2px 8px -4px rgba(20,10,10,.10);
+  }
+
+  /* The mobile menu hangs off the pill, so it is a floating card of its own
+     rather than a full-width sheet — a square-cornered sheet under a rounded
+     pill reads as a mistake. */
+  .nav-panel{
+    max-width:min(var(--maxw), calc(100% - 40px));
+    margin:8px auto 0;
+    border:1px solid var(--line);
+    border-radius:22px;
+    background:rgba(255,255,255,.94);
+    backdrop-filter:blur(16px) saturate(140%);
+    box-shadow:0 18px 44px -22px rgba(20,10,10,.40);
+    overflow:hidden;
   }
 
   /* The dot is the only mark in the logo; give it a slow breath so the header
@@ -442,14 +437,14 @@
   .nav-links a{padding:6px 2px;border-radius:8px;}
 
   @media(max-width:860px){
-    header[data-scrolled="true"]{padding:8px 0;}
-    header[data-scrolled="true"] nav{
-      padding:10px 12px 10px 18px;
+    header{padding:10px 0;}
+    nav{
+      padding:9px 10px 9px 16px;
       max-width:calc(100% - 20px);
     }
+    .nav-panel{max-width:calc(100% - 20px);}
   }
 
   @media (prefers-reduced-motion: reduce){
-    header,nav{transition:none;}
     .logo .dot{animation:none;}
   }
