@@ -346,6 +346,31 @@ function toAvailableSlot(row: {
  * `AT TIME ZONE` would need two conversions to be right and would put a second
  * copy of the timezone rule in a place nobody tests.
  */
+/**
+ * Wraps a read of the sessions table so that a database problem degrades to
+ * "nothing on offer" instead of a 500.
+ *
+ * /book is the page a visitor lands on to give you their business, and it
+ * already renders a proper empty state with a contact fallback. Showing that is
+ * strictly better than the error boundary, which is what an unreachable
+ * database produced in production — the deployed site had no DATABASE_URL, and
+ * every read threw.
+ *
+ * This only guards READS. The booking write is NOT wrapped: if the database is
+ * unreachable at the moment someone submits, they must be told it failed, never
+ * shown a confirmation for a booking that does not exist.
+ *
+ * Marker: grep SESSIONS_READ_FAILED to find these in the logs.
+ */
+async function readSessions<T>(what: string, run: () => Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await run()
+  } catch (error) {
+    console.error(`[slots] SESSIONS_READ_FAILED ${what} — serving an empty list`, error)
+    return fallback
+  }
+}
+
 export async function listAvailableDays(
   daysAhead: number = DEFAULT_DAYS_AHEAD,
 ): Promise<AvailableDay[]> {
@@ -353,15 +378,20 @@ export async function listAvailableDays(
   const horizon = Math.min(Math.max(Math.trunc(daysAhead), 1), 365)
   const windowEnd = startOfSessionDay(shiftSessionDate(sessionDateOf(now), horizon + 1))
 
-  const rows = await prisma.slot.findMany({
-    where: {
-      status: 'AVAILABLE',
-      startsAt: { gt: now, ...(windowEnd === null ? {} : { lt: windowEnd }) },
-    },
-    orderBy: { startsAt: 'asc' },
-    take: MAX_WINDOW_ROWS,
-    select: { startsAt: true },
-  })
+  const rows = await readSessions(
+    'listAvailableDays',
+    () =>
+      prisma.slot.findMany({
+        where: {
+          status: 'AVAILABLE',
+          startsAt: { gt: now, ...(windowEnd === null ? {} : { lt: windowEnd }) },
+        },
+        orderBy: { startsAt: 'asc' },
+        take: MAX_WINDOW_ROWS,
+        select: { startsAt: true },
+      }),
+    [] as { startsAt: Date }[],
+  )
 
   // Insertion order is the query's order, which is chronological, so the Map
   // hands the days back already sorted.
@@ -402,19 +432,24 @@ export async function listSessionsForDate(date: string): Promise<AvailableSlot[]
   const dayEnd = startOfSessionDay(shiftSessionDate(date, 1))
   if (dayEnd === null) return []
 
-  const rows = await prisma.slot.findMany({
-    where: {
-      status: 'AVAILABLE',
-      AND: [
-        { startsAt: { gte: dayStart } },
-        { startsAt: { lt: dayEnd } },
-        { startsAt: { gt: new Date() } },
-      ],
-    },
-    orderBy: { startsAt: 'asc' },
-    take: MAX_SESSIONS_PER_DAY,
-    select: { id: true, startsAt: true, endsAt: true, label: true },
-  })
+  const rows = await readSessions(
+    `listSessionsForDate(${date})`,
+    () =>
+      prisma.slot.findMany({
+        where: {
+          status: 'AVAILABLE',
+          AND: [
+            { startsAt: { gte: dayStart } },
+            { startsAt: { lt: dayEnd } },
+            { startsAt: { gt: new Date() } },
+          ],
+        },
+        orderBy: { startsAt: 'asc' },
+        take: MAX_SESSIONS_PER_DAY,
+        select: { id: true, startsAt: true, endsAt: true, label: true },
+      }),
+    [] as { id: string; startsAt: Date; endsAt: Date; label: string | null }[],
+  )
 
   return rows.map(toAvailableSlot)
 }
