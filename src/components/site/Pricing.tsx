@@ -1,4 +1,3 @@
-import { Magnetic, magneticBtnClass } from '@/components/motion/magnetic'
 import { Reveal } from '@/components/motion/reveal'
 import { pricing, type PricingTier } from '@/content/pricing'
 
@@ -64,7 +63,6 @@ export function Pricing() {
               {/* flex-col on the wrapper keeps the button full-bleed inside the
                   card, exactly as the bare anchor was when it stretched as the
                   card's own flex child. */}
-              <Magnetic className={`${magneticBtnClass} flex-col`}>
                 <a
                   href={tier.cta.href}
                   className={buttonClass(tier.cta.variant)}
@@ -72,7 +70,6 @@ export function Pricing() {
                 >
                   {tier.cta.label}
                 </a>
-              </Magnetic>
             </Reveal>
           ))}
         </div>

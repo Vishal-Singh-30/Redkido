@@ -472,3 +472,65 @@
   @media (prefers-reduced-motion: reduce){
     .logo .dot{animation:none;}
   }
+
+  /* ==========================================================================
+     Buttons: fill from the cursor.
+
+     Replaces a magnetic effect the client disliked. A magnetic button moves
+     away from the pointer that is trying to hit it; this one stays put and
+     fills from wherever you crossed its edge, draining back the way you left.
+
+     The origin comes from --fx/--fy, written by ButtonCursorFill. With no JS
+     they default to the centre, so the fill still works — it just always grows
+     from the middle.
+     ========================================================================== */
+
+  .btn{
+    position:relative;
+    overflow:hidden;
+    isolation:isolate;
+  }
+
+  .btn::before{
+    content:'';
+    position:absolute;
+    top:var(--fy,50%);
+    left:var(--fx,50%);
+    width:240%;
+    aspect-ratio:1;
+    translate:-50% -50%;
+    border-radius:50%;
+    /* Inside .btn's stacking context this paints above the button's own
+       background and below its text, which is exactly the layer we want. */
+    z-index:-1;
+    background:var(--red-deep);
+    scale:0;
+    transition:scale .48s var(--ease-out-soft);
+  }
+
+  .btn:hover::before,
+  .btn:focus-visible::before{scale:1;}
+
+  /* The original rule swapped the background flat on hover. Neutralised so the
+     fill is what you actually see; the 2px lift and the shadow are kept. */
+  .btn:hover{background:var(--red);}
+
+  .btn-ghost::before{background:var(--red);}
+  .btn-ghost{transition:color .3s var(--ease-out-soft),border-color .3s var(--ease-out-soft),transform .18s ease;}
+  .btn-ghost:hover,
+  .btn-ghost:focus-visible{
+    background:transparent;
+    color:#fff;
+    border-color:var(--red);
+  }
+
+  @media (prefers-reduced-motion: reduce){
+    .btn::before{transition:none;}
+  }
+
+  /* No cursor to fill from, and the fill would only be seen mid-tap. */
+  @media (pointer: coarse){
+    .btn::before{display:none;}
+    .btn:hover{background:#ff4b38;}
+    .btn-ghost:hover{background:var(--card-2);color:var(--text);border-color:var(--line-strong);}
+  }

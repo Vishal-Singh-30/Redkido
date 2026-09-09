@@ -1,4 +1,3 @@
-import { Magnetic, magneticBtnClass } from '@/components/motion/magnetic'
 import { Reveal } from '@/components/motion/reveal'
 import { siteConfig } from '@/config/site'
 import { finalCta, type CtaAction } from '@/content/cta'
@@ -43,18 +42,13 @@ export function FinalCta() {
           <h2>{finalCta.heading}</h2>
           <p>{finalCta.body}</p>
           <div className="cta-actions">
-            {/* Magnetic is a wrapper: the anchor keeps its href, its .btn class
-                and its focus ring, and the wrapper carries only the hover
-                scale + shadow that complements .btn:hover in globals.css. */}
-            {actions.map((action) => (
-              <Magnetic key={action.href} className={magneticBtnClass}>
+                        {actions.map((action) => (
                 <a
                   href={resolveContactHref(action.href)}
                   className={buttonClass(action.variant)}
                 >
                   {fillContactTokens(action.label)}
                 </a>
-              </Magnetic>
             ))}
           </div>
         </Reveal>

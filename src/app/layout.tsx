@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 
 import { siteConfig } from '@/config/site'
 import { MotionRoot } from '@/components/motion/motion-root'
+import { ButtonCursorFill } from '@/components/motion/button-cursor-fill'
 import { ScrollProgress } from '@/components/motion/scroll-progress'
 import { SmoothScroll } from '@/components/motion/smooth-scroll'
 
@@ -80,6 +81,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             enhancement in globals.css hangs off that attribute. With JS off the
             page renders exactly as authored. */}
         <MotionRoot />
+        <ButtonCursorFill />
         <ScrollProgress />
         <div className="noise" />
         {/* Inertial scrolling. SmoothScroll renders its children untouched and

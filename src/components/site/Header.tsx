@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { Magnetic, magneticBtnClass } from '@/components/motion/magnetic'
 import { navBrandHref, navBrandLabel, navCtas, navLinks, navMenuLabel } from '@/content/nav'
 import { Icon } from '@/components/site/Icons'
 import { resolveSectionHref, sectionIdOf } from '@/lib/section-nav'
@@ -230,11 +229,9 @@ export function Header() {
             rather than premium, so they are left exactly as they were. */}
         <div className="nav-cta">
           {navCtas.map((cta) => (
-            <Magnetic key={`${cta.variant}-${cta.href}`} className={magneticBtnClass}>
-              <NavAnchor href={cta.href} pathname={pathname} className={btnClass(cta.variant)}>
+                          <NavAnchor href={cta.href} pathname={pathname} className={btnClass(cta.variant)}>
                 {cta.label}
               </NavAnchor>
-            </Magnetic>
           ))}
         </div>
         <button
