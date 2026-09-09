@@ -39,7 +39,7 @@ export const bookingContent = {
   meta: {
     title: 'Book a free call',
     description:
-      'Pick a time that suits you and talk to the Redkido team. The call is free — no card, no invoice, nothing to pay before or after.',
+      'Pick a time that suits you and talk to the Redkido team. The call is free — no card, nothing to pay, before or after.',
   },
 
   hero: {

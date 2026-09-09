@@ -4,9 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Marketing site + paid-consultation booking for Redkido Consultancy (India). Next 16
+Marketing site + FREE call booking for Redkido Consultancy (India). Next 16
 App Router, React 19, TypeScript strict, Tailwind v4, Prisma 7 on Postgres,
-Razorpay for payments, Resend for email.
+Resend for email, Google Calendar for Meet links.
+
+**There is no payment anywhere.** Booking a call is free. An earlier version sold
+paid consultations through Razorpay with GST and FY-scoped invoices; all of that
+was removed (see the migration 20260104000000_free_calls and the commit that
+added it). If you find a reference to a price, tax, invoice or gateway, it is a
+leftover and should be deleted, not revived.
 
 It was converted from `redkido-consultancy_10.html`, a single 6.6MB static page that
 is still in the repo as the design reference. The 67 inline base64 JPEGs it carried
@@ -16,8 +22,11 @@ those exact class names, keyframes and breakpoints, so treat that region as
 copied-in rather than authored.
 
 Two funnels share one `Lead` table, tagged by `kind`:
-- **ENQUIRY** — free, no payment, no slot
-- **CONSULTATION** — a paid, time-slotted booking with a `Booking` row
+- **ENQUIRY** — a contact form submission. No slot, no meeting.
+- **CALL** — a booked call. Has exactly one `Booking` pointing at one `Slot`.
+
+Storing who reached out IS the product requirement; `/admin/leads` is where both
+funnels land.
 
 ## Commands
 
@@ -35,65 +44,46 @@ The whole admin and both funnels can be built with no hosted database.
 ### Verification scripts — run these after touching money, slots or validation
 
 ```bash
-npx tsx scripts/tax-invariant-test.ts    # 60k amounts + place-of-supply table + GSTIN checksum
-npx tsx scripts/slot-lifecycle-test.ts   # holds, reclaim, resale detection, DB double-book guard
-npx tsx scripts/validation-check.ts      # price-injection rejection, state/GSTIN errors
+npx tsx scripts/slot-lifecycle-test.ts   # the row lock, past/blocked sessions, DB double-book guard
+npx tsx scripts/validation-check.ts      # .strict() rejects injected fields; honeypot
 node scripts/content-fidelity.mjs <clean.html>   # no original copy lost
 ```
 
 ## Architecture
 
 **Copy and prices live in data, never in components.** `src/content/*.ts` holds every
-user-facing string; `src/config/site.ts` holds identity, contact channels and the GST
-configuration. A hardcoded string in a component is a defect — `content-fidelity.mjs`
+user-facing string; `src/config/site.ts` holds identity, contact channels and the
+reschedule policy. A hardcoded string in a component is a defect — `content-fidelity.mjs`
 exists to catch it. The WhatsApp number and social handles are placeholders with
 exactly one place to fix.
 
-**One price resolver.** `src/lib/pricing.ts` is the only thing that may know a price,
-and it reads the `ConsultationType` row. Both the booking page and `/api/checkout`
-call it, so the advertised and charged figures are one value rather than two that
-agree by luck. `src/lib/validation.ts` schemas contain no price/amount/total field at
-all and are `.strict()`, so an injected one is a 400 rather than a silently ignored key.
+**Sessions are the product.** A `Slot` is a start and an end that an admin
+published from `/admin/sessions`. There is no catalogue, no duration to choose
+and nothing priced. A visitor picks a date on `/book`, sees that date's
+AVAILABLE sessions in IST, and books one.
 
-**Money is integer paise everywhere.** `src/lib/money.ts` has the primitives; no float
-goes near a payment. GST is computed in `src/lib/tax.ts` under a hard invariant:
+**The slot race is still real.** Payment is gone; concurrency is not. Two
+visitors can choose the same session seconds apart, so `lockSlotForBooking`
+still takes `SELECT ... FOR UPDATE` **inside** the transaction that writes the
+booking, and rejects a session that is BOOKED, BLOCKED, past or unknown. Behind
+it, a **partial unique index** (`WHERE status = 'CONFIRMED'`) makes Postgres
+refuse a double-book even if the application logic is wrong. It is partial on
+purpose: cancelling a booking frees the session again.
 
-```
-taxablePaise + cgstPaise + sgstPaise + igstPaise === totalPaise    exactly, always
-```
+**Request schemas are `.strict()`.** `src/lib/validation.ts` rejects any key it
+did not ask for rather than ignoring it. There is no price to protect any more,
+but the same rule keeps a client from smuggling in a `status`, a `leadId`, or
+anything else the server owns. `scripts/validation-check.ts` covers this.
 
-Tax is derived by *subtraction* from a tax-inclusive total, never rounded twice.
+**Idempotency** — `fulfilBooking` runs after the booking transaction commits and
+each side effect is claimed with `UPDATE ... WHERE <col> IS NULL`
+(`googleEventId`, `confirmationEmailSentAt`, `ownerAlertSentAt`), so a retry
+cannot double-send or create two calendar events.
 
-**Place of supply is a per-transaction resolver, not a config flag** — see `GST.md`.
-Consultancy falls under IGST Act s.12(2), so a captured client state makes an
-out-of-state B2C booking inter-state; a valid GSTIN overrides the form. Each booking
-stores a human-readable `basis` string so the CA can audit one invoice without
-reading code.
-
-**Slot lifecycle** (`src/lib/slots.ts`) — this is the consultancy replacement for a
-capacity check, and the constraint is binary: "this slot is taken".
-
-- A PENDING checkout sets the slot `HELD` with a 15-minute `holdExpiresAt`
-- Availability includes `HELD` slots whose hold has lapsed
-- `lockSlotForBooking` takes `SELECT ... FOR UPDATE` **inside** the transaction and
-  retires lapsed holds to `CANCELLED`
-- `payment.failed` does **not** release the slot — a Razorpay order stays payable
-  after a decline, so the hold is left to expire instead
-- `payment.captured` re-acquires the slot; if it was resold, the booking is still
-  PAID (the money is real) but flagged `slotConflict` with the confirmation withheld
-- A **partial unique index** (`WHERE status = 'PAID'`) makes Postgres refuse a
-  double-book even if application logic is wrong
-
-**Idempotency** — the browser callback and the webhook race on every payment. Each
-side effect is claimed with `UPDATE ... WHERE <col> IS NULL` (`paidAt`,
-`confirmationEmailSentAt`, `ownerAlertSentAt`). Losing the race is a normal 200.
-
-The one exception is the **invoice serial**: `src/lib/invoice.ts` takes the row lock
-*before* calling `nextval`, because a GST invoice series must be gapless. The
-claim-then-check pattern used everywhere else would leave holes.
-
-**Email never breaks a payment.** `src/lib/email.ts` no-ops without `RESEND_API_KEY`
-and never throws; `fulfilBooking` swallows everything.
+**Email never breaks a booking.** `src/lib/email.ts` no-ops without
+`RESEND_API_KEY` and never throws; `fulfilBooking` swallows everything. A booking
+must still succeed when Resend or Google is down — the person has committed to a
+time and that is the thing worth keeping.
 
 ## Gotchas that have already cost time here
 
@@ -105,10 +95,8 @@ and never throws; `fulfilBooking` swallows everything.
 | `tsx` scripts are CJS | No `"type": "module"`, so top-level `await` is a hard error in `prisma/` and `scripts/`. Wrap in `async main()` |
 | Two Supabase poolers | 6543 (transaction) for the app on Vercel, 5432 (session) for migrations and local. Swapping them fails under load, not at startup |
 | dotenv order | `.env.local` must load before `.env` — dotenv keeps the **first** value. `prisma/env.ts` does this and every CLI entrypoint imports it first |
-| Webhook body | `request.text()`, never `.json()`. The HMAC covers exact bytes |
-| Webhook status | Answer 2xx to every *signed* event, including unhandled types and internal errors. ~24h of retries disables the endpoint |
-| Webhook dedup | Keyed on `processedAt`, not row existence — otherwise a delivery killed mid-handler is answered "duplicate" on retry and dropped forever |
-| Admin enum unions | `src/components/admin/shell.tsx` derives its types from the Prisma enums and uses `satisfies Record<Enum, string>`, so a new enum member breaks the build instead of rendering `undefined` |
+| Postgres enums | A value cannot be removed from an enum. Changing one means creating `<Name>_new`, swapping the column across with an explicit `USING` mapping, dropping the old type and renaming. Drop any index whose predicate references the column FIRST, or the swap fails with `operator does not exist` |
+| Admin enum unions | `src/components/admin/shell.tsx` derives its types from the Prisma enums and uses `satisfies Record<Enum, string>`, so a changed enum breaks the build instead of rendering `undefined`. This is what caught `LeadKind` losing CONSULTATION |
 | `next dev` rewrites this file | It appends a `nextjs-agent-rules` block on every run. Leave it; commit it with your work |
 
 
@@ -174,12 +162,12 @@ delete it** — a preview that has silently drifted is worse than none.
 
 ## Google Calendar + Meet
 
-`src/lib/google-calendar.ts` creates a Calendar event with a Meet conference on
-payment confirmation; `fulfilment.ts` claims it once per booking via
+`src/lib/google-calendar.ts` creates a Calendar event with a Meet conference when
+a call is booked; `fulfilment.ts` claims it once per booking via
 `googleEventId` and puts the link in the confirmation email. Zero dependencies —
 the OAuth refresh is hand-rolled `fetch`.
 
-Never throws: it is on the payment path, so every call returns `null` on failure
+Never throws: it is on the booking path, so every call returns `null` on failure
 and fulfilment falls back to the meeting link in `/admin/settings`. Our own
 `Slot` rows stay the booking authority; `getBusyIntervals()` is advisory only.
 
@@ -189,8 +177,7 @@ go-live or Meet links silently stop appearing a week in.
 
 ## Related documents
 
-- `DEPLOYMENT.md` — go-live runbook (Supabase → Vercel → domain → Razorpay → Resend → a real ₹1 payment)
-- `GST.md` — the place-of-supply analysis and the open questions for the CA
+- `DEPLOYMENT.md` — go-live runbook (Supabase → Vercel → domain → Resend → Google Meet)
 - `README.md` — local setup
 
 <!-- BEGIN:nextjs-agent-rules -->

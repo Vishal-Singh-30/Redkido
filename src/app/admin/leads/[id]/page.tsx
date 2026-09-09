@@ -1,8 +1,15 @@
+/**
+ * /admin/leads/[id] — one person, everything known about them.
+ *
+ * The amount breakdown, the place-of-supply audit trail and the payment/invoice
+ * panel are gone with the columns behind them; a free call has no money, no tax
+ * and no gateway reference to show. What is left is what an admin acts on: the
+ * session that was booked, the meeting link, and whether the emails went out.
+ */
+
 import Link from 'next/link'
 import { notFound } from 'next/navigation'
 import { prisma } from '@/lib/prisma'
-import { formatINR } from '@/lib/money'
-import { siteConfig } from '@/config/site'
 import { updateLeadAction } from '@/app/admin/actions'
 import {
   BookingStatusBadge,
@@ -13,28 +20,23 @@ import {
   Notice,
   PageHeader,
   Panel,
+  SlotStatusBadge,
   adminCopy,
+  fieldClass,
+  fieldLabelClass,
+  formatDate,
   formatDateTime,
   formatText,
+  formatTimeRange,
 } from '@/components/admin/shell'
+
+const NOTES_MAX_LENGTH = 5000
 
 type SearchParams = Promise<Record<string, string | string[] | undefined>>
 
 function firstValue(value: string | string[] | undefined): string | undefined {
   if (Array.isArray(value)) return value[0]
   return value
-}
-
-/**
- * The booking stores the place-of-supply COLUMNS, not a sentence. This renders
- * the sentence from those columns so the CA can read the reasoning next to the
- * evidence — see adminCopy.leadDetail.tax.derivedWarning.
- */
-function placeOfSupplyBasis(booking: { clientGstin: string | null; clientStateCode: string | null }): string {
-  const copy = adminCopy.leadDetail.tax
-  if (booking.clientGstin && booking.clientGstin.trim().length > 0) return copy.basisRegistered
-  if (booking.clientStateCode && booking.clientStateCode.trim().length > 0) return copy.basisAddressOnRecord
-  return copy.basisSupplierLocation
 }
 
 export default async function LeadDetailPage({
@@ -49,14 +51,7 @@ export default async function LeadDetailPage({
 
   const lead = await prisma.lead.findUnique({
     where: { id },
-    include: {
-      booking: {
-        include: {
-          slot: true,
-          consultationType: true,
-        },
-      },
-    },
+    include: { booking: { include: { slot: true } } },
   })
 
   if (!lead) notFound()
@@ -66,9 +61,6 @@ export default async function LeadDetailPage({
 
   const booking = lead.booking
   const detail = adminCopy.leadDetail
-
-  const taxTotalPaise = booking ? booking.cgstPaise + booking.sgstPaise + booking.igstPaise : 0
-  const invariantHolds = booking ? booking.taxablePaise + taxTotalPaise === booking.totalPaise : true
 
   return (
     <>
@@ -86,7 +78,7 @@ export default async function LeadDetailPage({
       {errored ? <Notice tone="error">{detail.manage.error}</Notice> : null}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        <div className="space-y-6 lg:col-span-2">
+        <div className="min-w-0 space-y-6 lg:col-span-2">
           <Panel title={detail.sections.lead}>
             <DataGrid>
               <DataRow label={detail.fields.kind} value={<KindBadge kind={lead.kind} />} />
@@ -114,24 +106,45 @@ export default async function LeadDetailPage({
 
           {booking ? (
             <>
-              <Panel title={detail.sections.booking}>
+              <Panel
+                title={detail.sections.booking}
+                description={adminCopy.sessions.timezoneNote}
+              >
+                {booking.meetingUrl ? null : (
+                  <Notice tone="warning">{detail.booking.meetingUrlMissing}</Notice>
+                )}
                 <DataGrid>
                   <DataRow
                     label={detail.booking.status}
                     value={<BookingStatusBadge status={booking.status} />}
                   />
-                  <DataRow label={detail.booking.type} value={booking.consultationType.name} />
-                  <DataRow
-                    label={detail.booking.duration}
-                    value={`${booking.consultationType.durationMins} ${detail.booking.durationUnit}`}
-                  />
                   <DataRow
                     label={detail.booking.slotStatus}
-                    value={adminCopy.slotStatusLabels[booking.slot.status]}
+                    value={<SlotStatusBadge status={booking.slot.status} />}
                   />
-                  <DataRow label={detail.booking.slotStart} value={formatDateTime(booking.slot.startsAt)} />
-                  <DataRow label={detail.booking.slotEnd} value={formatDateTime(booking.slot.endsAt)} />
-                  <DataRow label={detail.booking.meetingUrl} value={formatText(booking.meetingUrl)} />
+                  <DataRow label={detail.booking.sessionDate} value={formatDate(booking.slot.startsAt)} />
+                  <DataRow
+                    label={detail.booking.sessionTime}
+                    value={formatTimeRange(booking.slot.startsAt, booking.slot.endsAt)}
+                  />
+                  <DataRow label={detail.booking.sessionLabel} value={formatText(booking.slot.label)} />
+                  <DataRow
+                    label={detail.booking.meetingUrl}
+                    value={
+                      booking.meetingUrl ? (
+                        <a
+                          href={booking.meetingUrl}
+                          rel="noreferrer noopener"
+                          target="_blank"
+                          className="font-semibold text-red hover:underline"
+                        >
+                          {booking.meetingUrl}
+                        </a>
+                      ) : (
+                        adminCopy.common.empty
+                      )
+                    }
+                  />
                   <DataRow label={detail.booking.rescheduleCount} value={String(booking.rescheduleCount)} />
                   <DataRow label={detail.booking.createdAt} value={formatDateTime(booking.createdAt)} />
                   <DataRow
@@ -139,87 +152,11 @@ export default async function LeadDetailPage({
                     value={<code className="text-xs">{booking.id}</code>}
                   />
                 </DataGrid>
-              </Panel>
-
-              <Panel title={detail.sections.money} description={detail.money.inclusiveNote}>
-                {invariantHolds ? null : <Notice tone="error">{detail.money.invariantBroken}</Notice>}
-                <dl className="divide-y divide-line">
-                  <div className="flex justify-between py-2.5 text-sm">
-                    <dt className="text-muted">{detail.money.taxable}</dt>
-                    <dd className="font-semibold text-ink">{formatINR(booking.taxablePaise)}</dd>
-                  </div>
-                  {booking.isInterState ? (
-                    <div className="flex justify-between py-2.5 text-sm">
-                      <dt className="text-muted">{detail.money.igst}</dt>
-                      <dd className="font-semibold text-ink">{formatINR(booking.igstPaise)}</dd>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="flex justify-between py-2.5 text-sm">
-                        <dt className="text-muted">{detail.money.cgst}</dt>
-                        <dd className="font-semibold text-ink">{formatINR(booking.cgstPaise)}</dd>
-                      </div>
-                      <div className="flex justify-between py-2.5 text-sm">
-                        <dt className="text-muted">{detail.money.sgst}</dt>
-                        <dd className="font-semibold text-ink">{formatINR(booking.sgstPaise)}</dd>
-                      </div>
-                    </>
-                  )}
-                  <div className="flex justify-between py-2.5 text-sm">
-                    <dt className="font-semibold text-ink">{detail.money.total}</dt>
-                    <dd className="font-display text-lg font-bold text-red">{formatINR(booking.totalPaise)}</dd>
-                  </div>
-                  <div className="flex justify-between py-2.5 text-sm">
-                    <dt className="text-muted">{detail.money.gstRate}</dt>
-                    <dd className="text-ink">{`${booking.gstRatePercent}%`}</dd>
-                  </div>
-                  <div className="flex justify-between py-2.5 text-sm">
-                    <dt className="text-muted">{detail.money.sacCode}</dt>
-                    <dd className="text-ink">{booking.sacCode}</dd>
-                  </div>
-                </dl>
-                <p className="mt-4 text-xs text-muted-2">{detail.money.invariant}</p>
-              </Panel>
-
-              <Panel title={detail.sections.tax}>
-                <DataGrid>
-                  <DataRow
-                    label={detail.tax.supplyType}
-                    value={booking.isInterState ? detail.tax.interState : detail.tax.intraState}
-                  />
-                  <DataRow label={detail.tax.placeOfSupply} value={booking.placeOfSupplyStateCode} />
-                  <DataRow label={detail.tax.clientState} value={formatText(booking.clientStateCode)} />
-                  <DataRow label={detail.tax.clientGstin} value={formatText(booking.clientGstin)} />
-                  <DataRow
-                    label={detail.tax.supplierState}
-                    value={`${siteConfig.tax.supplierStateName} (${siteConfig.tax.supplierStateCode})`}
-                  />
-                  <DataRow label={detail.tax.basis} wide value={placeOfSupplyBasis(booking)} />
-                </DataGrid>
-                <p className="mt-4 text-xs text-muted-2">{detail.tax.derivedWarning}</p>
-              </Panel>
-
-              <Panel title={detail.sections.payment}>
-                {booking.paidAt ? null : <Notice tone="warning">{detail.payment.unpaid}</Notice>}
-                <DataGrid>
-                  <DataRow label={detail.payment.paidAt} value={formatDateTime(booking.paidAt)} />
-                  <DataRow label={detail.payment.invoiceNumber} value={formatText(booking.invoiceNumber)} />
-                  <DataRow label={detail.payment.invoiceFy} value={formatText(booking.invoiceFy)} />
-                  <DataRow
-                    label={detail.payment.razorpayOrderId}
-                    value={<code className="text-xs">{booking.razorpayOrderId}</code>}
-                  />
-                  <DataRow
-                    label={detail.payment.razorpayPaymentId}
-                    value={
-                      booking.razorpayPaymentId ? (
-                        <code className="text-xs">{booking.razorpayPaymentId}</code>
-                      ) : (
-                        adminCopy.common.empty
-                      )
-                    }
-                  />
-                </DataGrid>
+                <p className="mt-5">
+                  <Link href="/admin/sessions" className="text-sm font-semibold text-red hover:underline">
+                    {detail.booking.manageSessions}
+                  </Link>
+                </p>
               </Panel>
 
               <Panel title={detail.sections.emails}>
@@ -236,26 +173,21 @@ export default async function LeadDetailPage({
             </>
           ) : (
             <Panel title={detail.sections.booking}>
-              <EmptyBooking />
+              <p className="text-sm text-muted">{detail.booking.none}</p>
             </Panel>
           )}
         </div>
 
-        <div className="lg:col-span-1">
+        <div className="min-w-0 lg:col-span-1">
           <Panel title={detail.sections.manage}>
             <form action={updateLeadAction} className="space-y-5">
               <input type="hidden" name="leadId" value={lead.id} />
 
               <div className="flex flex-col gap-1.5">
-                <label htmlFor="lead-status" className="text-xs font-semibold text-muted-2 uppercase">
+                <label htmlFor="lead-status" className={fieldLabelClass}>
                   {detail.manage.statusLabel}
                 </label>
-                <select
-                  id="lead-status"
-                  name="status"
-                  defaultValue={lead.status}
-                  className="rounded-lg border border-line-strong bg-bg px-3 py-2 text-sm text-ink"
-                >
+                <select id="lead-status" name="status" defaultValue={lead.status} className={fieldClass}>
                   {LEAD_STATUSES.map((value) => (
                     <option key={value} value={value}>
                       {adminCopy.leadStatusLabels[value]}
@@ -265,17 +197,17 @@ export default async function LeadDetailPage({
               </div>
 
               <div className="flex flex-col gap-1.5">
-                <label htmlFor="lead-notes" className="text-xs font-semibold text-muted-2 uppercase">
+                <label htmlFor="lead-notes" className={fieldLabelClass}>
                   {detail.manage.notesLabel}
                 </label>
                 <textarea
                   id="lead-notes"
                   name="notes"
                   rows={8}
-                  maxLength={5000}
+                  maxLength={NOTES_MAX_LENGTH}
                   defaultValue={lead.notes ?? ''}
                   placeholder={detail.manage.notesPlaceholder}
-                  className="rounded-lg border border-line-strong bg-bg px-3 py-2 text-sm text-ink placeholder:text-muted-2"
+                  className={fieldClass}
                 />
                 <p className="text-xs text-muted-2">{detail.manage.notesHelp}</p>
               </div>
@@ -292,8 +224,4 @@ export default async function LeadDetailPage({
       </div>
     </>
   )
-}
-
-function EmptyBooking() {
-  return <p className="text-sm text-muted">{adminCopy.leadDetail.booking.none}</p>
 }

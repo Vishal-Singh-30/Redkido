@@ -342,10 +342,8 @@ export const adminCopy = {
       description: 'A single date and start time.',
       dateLabel: 'Date',
       timeLabel: 'Start time (IST)',
-      durationLabel: 'Length',
-      durationUnit: 'minutes',
-      labelLabel: 'Label',
-      labelOptional: 'optional',
+      durationLabel: 'Length in minutes',
+      labelLabel: 'Label (optional)',
       labelPlaceholder: 'Intro call',
       labelHelp: 'Shown to the visitor beside the time. Leave it blank for none.',
       submit: 'Add session',
@@ -381,7 +379,7 @@ export const adminCopy = {
 
     list: {
       title: 'Upcoming sessions',
-      description: 'Grouped by IST date. Sessions that have already started are not listed.',
+      description: 'Grouped by IST date, starting from today. Past dates are not listed.',
       empty: 'No upcoming sessions. Publish some above, or the booking page has nothing to offer.',
       truncated: 'Only the soonest sessions are listed. Publish fewer months at a time to see them all.',
       columns: {

@@ -1,336 +1,86 @@
 'use client'
 
 /**
- * Funnel 2 — the paid consultation form.
+ * Funnel 2 — booking a free call.
+ *
+ * ── IT WORKS WITHOUT JAVASCRIPT ─────────────────────────────────────────────
+ * This is the product now, so it may not be a form that only runs when a
+ * bundle does. Every control here is a real HTML control:
+ *
+ *   - the day strip is a row of LINKS to /book?date=YYYY-MM-DD, so a click
+ *     without JS is a page navigation that renders that day server-side;
+ *   - the times are real RADIO INPUTS, so selection, keyboard support and the
+ *     posted value are all the browser's job rather than ours;
+ *   - the chosen-time highlight is CSS (`has-[:checked]`), not React state, so
+ *     the picker looks the same whether or not anything hydrated;
+ *   - the <form> has a real method and action, so submitting it without JS
+ *     posts to /api/book, which answers a native post with a 303 redirect.
+ *
+ * With JS, all of that is intercepted: days switch in place, the submit posts
+ * JSON, and a lost race refreshes the day instead of reloading the page.
+ *
+ * `noValidate` is set in an effect rather than in the markup — see the comment
+ * on it below. It is the one piece of this file where the two paths differ on
+ * purpose.
  *
  * ── WHAT THIS COMPONENT MAY NOT DO ──────────────────────────────────────────
- * It never posts an amount. The body it sends carries who, what and when, and
- * the server prices it from the ConsultationType row; the total rendered here
- * is display only, handed down by the page from the same resolver the checkout
- * API bills with. Tampering with it in devtools changes a label and nothing
- * else.
+ * There is no price, no total, no summary panel and no payment step. The call
+ * is free; the only thing being chosen is a time.
  *
- * ── ORDER OF OPERATIONS ─────────────────────────────────────────────────────
- * The Razorpay script is loaded lazily — on the first submit, never on page
- * load — and it is loaded BEFORE the checkout call. That ordering matters: a
- * blocked or failed script then costs nothing, whereas loading it after the
- * booking exists would leave a slot held for a payment that can never start.
+ * ── THE TYPES COME FROM THE SERVER, THE FORMATTING DOES TOO ─────────────────
+ * `import type` from '@/lib/slots' is erased at compile time, so the Prisma
+ * client never reaches this bundle. Every label — the day names, the time
+ * ranges — is formatted in Asia/Kolkata on the server and arrives as a string,
+ * so this file ships no Intl formatter and cannot disagree with the server
+ * about what day a 23:30 IST session falls on.
  *
- * A 409 from the checkout API means somebody else paid for that slot while this
- * form was open. The list is refetched, the selection is cleared, and the user
- * picks again — no page reload, no stale times.
- *
- * ── THE PICKER ──────────────────────────────────────────────────────────────
- * Two steps: a horizontal strip of days, then the times inside the chosen day.
- * Days are bucketed in Asia/Kolkata, never in the viewer's zone — a 9pm IST
- * slot is Wednesday for the supplier and must read as Wednesday for a viewer in
- * London too, or the strip and the label disagree about the same slot.
- *
- * All copy comes from src/content/forms.ts.
+ * All copy comes from src/content/booking.ts.
  */
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import type { FormEvent, KeyboardEvent, ReactNode } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import type { FormEvent, KeyboardEvent, MouseEvent, ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
 import { Icon } from '@/components/site/Icons'
-import { siteConfig } from '@/config/site'
-import { bookingForm, indianStates, type FormField } from '@/content/forms'
-import { formatINR } from '@/lib/money'
-import type { AvailableSlot } from '@/lib/slots'
+import { bookingContent } from '@/content/booking'
+import type { AvailableDay, AvailableSlot } from '@/lib/slots'
 
-/** Machine codes from the checkout, verify and slots routes. Protocol, not copy. */
+const BOOK_PATH = '/book'
+const SUCCESS_PATH = '/book/success'
+const BOOK_ENDPOINT = '/api/book'
+const SLOTS_ENDPOINT = '/api/slots'
+const ENQUIRY_HREF = '/#contact'
+
+/** Machine codes from /api/book and /api/slots. Protocol, not copy. */
 const API_CODE = {
   validation: 'VALIDATION',
   slotUnavailable: 'SLOT_UNAVAILABLE',
-  slotInPast: 'SLOT_IN_PAST',
-  consultationUnavailable: 'CONSULTATION_UNAVAILABLE',
-  paymentUnavailable: 'PAYMENT_UNAVAILABLE',
-  orderFailed: 'ORDER_FAILED',
   rateLimited: 'RATE_LIMITED',
 } as const
-
-const CHECKOUT_ENDPOINT = '/api/checkout'
-const VERIFY_ENDPOINT = '/api/checkout/verify'
-const SLOTS_ENDPOINT = '/api/slots'
-const SUCCESS_PATH = '/consultation/success'
-
-/** Razorpay's hosted Checkout. Loaded on demand, never on page load. */
-const CHECKOUT_SCRIPT = 'https://checkout.razorpay.com/v1/checkout.js'
-const SCRIPT_TIMEOUT_MS = 12_000
 
 /** Mirrors the bounds in src/lib/validation.ts so both reject the same input. */
 const NAME_MIN = 2
 
+const { picker, fields, details, errors } = bookingContent
+
 type FieldErrors = Record<string, string>
 
-type Status = 'idle' | 'starting' | 'paying' | 'verifying'
-
-type CheckoutResponse = {
+type BookResponse = {
   ok?: boolean
   code?: string
+  reason?: 'TAKEN' | 'PAST' | 'NOT_FOUND'
   fieldErrors?: FieldErrors
-  orderId?: string
-  amountPaise?: number
-  currency?: string
-  keyId?: string
-  bookingId?: string
-  prefill?: { name?: string; email?: string; contact?: string }
 }
 
-type SlotsResponse = {
+type SessionsResponse = {
   ok?: boolean
-  slots?: AvailableSlot[]
+  date?: string
+  sessions?: AvailableSlot[]
 }
 
-/* ─────────────────────────── Razorpay Checkout ──────────────────────────── */
-
-type RazorpayHandlerResponse = {
-  razorpay_order_id: string
-  razorpay_payment_id: string
-  razorpay_signature: string
+type DaysResponse = {
+  ok?: boolean
+  days?: AvailableDay[]
 }
-
-type RazorpayOptions = {
-  key: string
-  amount: number
-  currency: string
-  order_id: string
-  name: string
-  description: string
-  prefill: { name: string; email: string; contact: string }
-  notes: Record<string, string>
-  theme?: { color: string }
-  handler: (response: RazorpayHandlerResponse) => void
-  modal: { ondismiss: () => void }
-}
-
-type RazorpayInstance = {
-  open: () => void
-  on?: (event: string, handler: (payload: unknown) => void) => void
-}
-
-type RazorpayConstructor = new (options: RazorpayOptions) => RazorpayInstance
-
-declare global {
-  interface Window {
-    Razorpay?: RazorpayConstructor
-  }
-}
-
-/**
- * Resolves true once window.Razorpay is usable. Resolves FALSE — never rejects,
- * never hangs — when the script is blocked, fails, or takes too long: an ad
- * blocker eating checkout.js is the single most common failure here and it must
- * surface as a message the user can act on.
- */
-function loadCheckoutScript(): Promise<boolean> {
-  if (typeof window === 'undefined') return Promise.resolve(false)
-  if (window.Razorpay !== undefined) return Promise.resolve(true)
-
-  return new Promise<boolean>((resolve) => {
-    let settled = false
-    const finish = (value: boolean) => {
-      if (settled) return
-      settled = true
-      resolve(value)
-    }
-
-    const timer = window.setTimeout(() => finish(false), SCRIPT_TIMEOUT_MS)
-    const done = (value: boolean) => {
-      window.clearTimeout(timer)
-      finish(value)
-    }
-
-    const existing = document.querySelector<HTMLScriptElement>(`script[src="${CHECKOUT_SCRIPT}"]`)
-    const script = existing ?? document.createElement('script')
-
-    script.addEventListener('load', () => done(window.Razorpay !== undefined), { once: true })
-    script.addEventListener('error', () => done(false), { once: true })
-
-    if (existing === null) {
-      script.src = CHECKOUT_SCRIPT
-      script.async = true
-      document.head.appendChild(script)
-    }
-  })
-}
-
-/** The brand red, read from the stylesheet so no hex is duplicated in TS. */
-function checkoutThemeColor(): string {
-  if (typeof window === 'undefined') return ''
-  return getComputedStyle(document.documentElement).getPropertyValue('--red').trim()
-}
-
-/* ─────────────────────── days, times, grouping ──────────────────────────── */
-
-/**
- * Mirrors SLOT_TIME_ZONE / SLOT_LOCALE in src/lib/slots.ts. Duplicated rather
- * than imported because that module pulls in the Prisma client, and a value
- * import from it would drag the whole thing into this client bundle. The two
- * must stay in step: the server labels slots in this zone, and grouping them in
- * any other one would file a late-evening slot under the wrong day.
- */
-const SLOT_ZONE = 'Asia/Kolkata'
-const SLOT_LOCALE = 'en-IN'
-
-const DAY_MS = 86_400_000
-/** Beyond this the strip stops padding gaps and just lists the days it has. */
-const MAX_DAY_CHIPS = 31
-
-/** Parts of an instant AS SEEN IN IST — the only zone this picker reasons in. */
-const dayKeyFormat = new Intl.DateTimeFormat('en-US', {
-  timeZone: SLOT_ZONE,
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-})
-
-/** "2026-04-14" — the IST calendar date an instant falls on. */
-function dayKeyOf(iso: string): string {
-  const parts = dayKeyFormat.formatToParts(new Date(iso))
-  const part = (type: Intl.DateTimeFormatPartTypes): string =>
-    parts.find((candidate) => candidate.type === type)?.value ?? ''
-  return `${part('year')}-${part('month')}-${part('day')}`
-}
-
-/**
- * A key back to a Date. The key is already an IST calendar date, so it is read
- * at UTC midnight and every label below is formatted in UTC — that returns the
- * date's own parts verbatim, with no second zone conversion to get wrong. It
- * also lets a day with NO slots still be labelled, which the strip needs.
- */
-function keyToDate(key: string): Date {
-  return new Date(`${key}T00:00:00Z`)
-}
-
-const utc = { timeZone: 'UTC' } as const
-const weekdayFormat = new Intl.DateTimeFormat(SLOT_LOCALE, { weekday: 'short', ...utc })
-const dayNumberFormat = new Intl.DateTimeFormat(SLOT_LOCALE, { day: 'numeric', ...utc })
-const monthFormat = new Intl.DateTimeFormat(SLOT_LOCALE, { month: 'short', ...utc })
-const fullDayFormat = new Intl.DateTimeFormat(SLOT_LOCALE, {
-  weekday: 'long',
-  day: 'numeric',
-  month: 'long',
-  ...utc,
-})
-
-/** Clock time only. The date is already established by the day above it. */
-const timeFormat = new Intl.DateTimeFormat(SLOT_LOCALE, {
-  hour: 'numeric',
-  minute: '2-digit',
-  hour12: true,
-  timeZone: SLOT_ZONE,
-})
-
-/**
- * "10:00 – 10:45 am". formatRange collapses the shared meridiem, which is why
- * it is preferred — but only for a slot that starts and ends on the same IST
- * day. Once one crosses midnight, formatRange prints both calendar dates
- * ("9/9/2026, 11:30 pm – 10/9/2026, 12:15 am"), and the date is already
- * established by the heading above the list.
- */
-function timeRangeOf(slot: AvailableSlot): string {
-  const startsAt = new Date(slot.startsAt)
-  const endsAt = new Date(slot.endsAt)
-  try {
-    if (dayKeyOf(slot.startsAt) === dayKeyOf(slot.endsAt)) {
-      return timeFormat.formatRange(startsAt, endsAt)
-    }
-  } catch {
-    // Fall through to the two-format form, which cannot throw on a valid date.
-  }
-  return `${timeFormat.format(startsAt)} – ${timeFormat.format(endsAt)}`
-}
-
-type DayGroup = {
-  readonly key: string
-  readonly weekday: string
-  readonly dayNumber: string
-  readonly month: string
-  readonly full: string
-  readonly slots: readonly AvailableSlot[]
-}
-
-function toDayGroup(key: string, slots: readonly AvailableSlot[]): DayGroup {
-  const date = keyToDate(key)
-  return {
-    key,
-    weekday: weekdayFormat.format(date),
-    dayNumber: dayNumberFormat.format(date),
-    month: monthFormat.format(date),
-    full: fullDayFormat.format(date),
-    slots,
-  }
-}
-
-/**
- * Slots bucketed into IST days, earliest first.
- *
- * Both levels are sorted explicitly. listAvailableSlots() already returns them
- * in order, but /api/slots is a JSON boundary and the picker should not be one
- * reordering away from showing 4pm above 10am. ISO-8601 strings from
- * toISOString() sort lexicographically in chronological order.
- */
-function groupSlotsByDay(slots: readonly AvailableSlot[]): DayGroup[] {
-  const buckets = new Map<string, AvailableSlot[]>()
-
-  for (const slot of slots) {
-    const key = dayKeyOf(slot.startsAt)
-    const bucket = buckets.get(key)
-    if (bucket === undefined) buckets.set(key, [slot])
-    else bucket.push(slot)
-  }
-
-  return [...buckets.keys()]
-    .sort()
-    .map((key) =>
-      toDayGroup(
-        key,
-        [...(buckets.get(key) ?? [])].sort((a, b) => a.startsAt.localeCompare(b.startsAt)),
-      ),
-    )
-}
-
-/**
- * The day strip: every date from the first bookable day to the last, INCLUDING
- * the ones with nothing on them.
- *
- * A strip that jumps 9 → 11 → 16 reads as broken; a continuous run shows the
- * shape of the diary, and an empty day is still selectable so that picking one
- * explains itself rather than doing nothing. If availability is so sparse that
- * the run would be mostly blanks, the compact list is used instead.
- */
-function buildDayStrip(groups: readonly DayGroup[]): DayGroup[] {
-  const first = groups[0]
-  const last = groups[groups.length - 1]
-  if (first === undefined || last === undefined) return []
-
-  const byKey = new Map(groups.map((group) => [group.key, group]))
-  const strip: DayGroup[] = []
-  const end = keyToDate(last.key).getTime()
-
-  for (
-    let cursor = keyToDate(first.key).getTime();
-    cursor <= end && strip.length < MAX_DAY_CHIPS;
-    cursor += DAY_MS
-  ) {
-    const key = new Date(cursor).toISOString().slice(0, 10)
-    strip.push(byKey.get(key) ?? toDayGroup(key, []))
-  }
-
-  const kept = strip.filter((day) => day.slots.length > 0).length
-  return kept < groups.length ? [...groups] : strip
-}
-
-/* ──────────────────────────────── copy ──────────────────────────────────── */
-
-const fields: Record<
-  'name' | 'email' | 'phone' | 'company' | 'stateCode' | 'gstin' | 'notes',
-  FormField
-> = bookingForm.fields
-const picker = bookingForm.slotPicker
-const summary = bookingForm.summary
-const errors = bookingForm.errors
 
 /* ──────────────────────────────── markup ────────────────────────────────── */
 
@@ -342,26 +92,36 @@ const hintClass = 'text-[12.5px] text-muted'
 const errorClass = 'text-[12.5px] font-medium text-red'
 
 /**
- * Picker surfaces. Every value here is an existing token — --red for the chosen
+ * Picker surfaces. Every value is an existing token — --red for the chosen
  * fill, --card-2 for hover, --line / --line-strong for the resting edge — so
  * the picker reads as part of the same page rather than a widget dropped on it.
  * The focus ring is offset against --card, the form's own background, so it
  * stays visible on the red fill too.
  */
+const chosenFill =
+  'border-red bg-red text-white shadow-[0_8px_20px_-10px_rgba(232,54,43,0.8)]'
+const restingFill = 'border-line bg-bg hover:border-line-strong hover:bg-card-2'
 const focusRing =
   'outline-none focus-visible:ring-2 focus-visible:ring-red/40 focus-visible:ring-offset-2 focus-visible:ring-offset-card'
-const chosenSurface =
-  'border-red bg-red text-white shadow-[0_8px_20px_-10px_rgba(232,54,43,0.8)]'
-const restingSurface = 'border-line bg-bg hover:border-line-strong hover:bg-card-2'
 
 /**
- * `relative` is load-bearing: the chip carries an sr-only slot count, sr-only is
- * position:absolute, and without a positioned chip its containing block becomes
- * the wrapper OUTSIDE the horizontal scroller — which means the scroller cannot
- * clip it and the whole PAGE gains a sideways scrollbar the width of the strip.
+ * `relative` is load-bearing: the chip carries an sr-only session count, sr-only
+ * is position:absolute, and without a positioned chip its containing block
+ * becomes the wrapper OUTSIDE the horizontal scroller — which means the
+ * scroller cannot clip it and the whole PAGE gains a sideways scrollbar the
+ * width of the strip.
  */
-const dayChipClass = `relative flex w-[64px] shrink-0 snap-start flex-col items-center gap-1 rounded-xl border px-2 py-2.5 transition duration-200 disabled:cursor-not-allowed disabled:opacity-55 ${focusRing}`
-const timeRowClass = `flex w-full items-center gap-2.5 rounded-xl border px-3.5 py-3 text-[14.5px] transition duration-200 disabled:cursor-not-allowed disabled:opacity-55 ${focusRing}`
+const dayChipClass = `relative flex w-[64px] shrink-0 snap-start flex-col items-center gap-1 rounded-xl border px-2 py-2.5 transition duration-200 ${focusRing}`
+
+/**
+ * The chosen-time styling is driven by :has(:checked) rather than by React, so
+ * the highlight follows the radio the browser actually checked — with or
+ * without JavaScript, and including a value the browser restored on a back
+ * navigation.
+ */
+const timeRowClass =
+  'group relative flex w-full cursor-pointer items-center gap-2.5 rounded-xl border border-line bg-bg px-3.5 py-3 text-[14.5px] text-ink transition duration-200 hover:border-line-strong hover:bg-card-2 has-[:checked]:border-red has-[:checked]:bg-red has-[:checked]:font-semibold has-[:checked]:text-white has-[:checked]:shadow-[0_8px_20px_-10px_rgba(232,54,43,0.8)] has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-red/40 has-[:focus-visible]:ring-offset-2 has-[:focus-visible]:ring-offset-card has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-55'
+
 const noticeClass =
   'flex items-start gap-3 rounded-xl border border-dashed border-line-strong bg-bg-2 px-4 py-4'
 
@@ -407,23 +167,19 @@ function describedBy(id: string, error: string | undefined, hint: string | undef
 }
 
 /**
- * Arrow keys walk the buttons inside one picker group, Home/End jump the ends.
+ * Arrow keys walk the day strip, Home/End jump to its ends.
  *
- * Focus only — nothing is selected until Enter or Space, so a keyboard user can
- * read across the strip without committing to a day on every keypress. Tab
- * still leaves the group, because these are ordinary buttons and no roving
- * tabindex is taken away from them.
+ * Focus only — nothing is chosen until Enter, so a keyboard user can read
+ * across the strip without loading a different day on every keypress. The list
+ * of times below needs none of this: it is a native radio group, and the
+ * browser has done arrow keys there since 1995.
  */
-function moveRovingFocus(event: KeyboardEvent<HTMLDivElement>, axis: 'x' | 'y'): void {
-  const previousKey = axis === 'x' ? 'ArrowLeft' : 'ArrowUp'
-  const nextKey = axis === 'x' ? 'ArrowRight' : 'ArrowDown'
+function moveRovingFocus(event: KeyboardEvent<HTMLDivElement>): void {
   const { key } = event
-  if (key !== previousKey && key !== nextKey && key !== 'Home' && key !== 'End') return
+  if (key !== 'ArrowLeft' && key !== 'ArrowRight' && key !== 'Home' && key !== 'End') return
 
-  const items = [
-    ...event.currentTarget.querySelectorAll<HTMLButtonElement>('button[data-pick]'),
-  ].filter((button) => !button.disabled)
-  const index = items.indexOf(document.activeElement as HTMLButtonElement)
+  const items = [...event.currentTarget.querySelectorAll<HTMLAnchorElement>('a[data-pick]')]
+  const index = items.indexOf(document.activeElement as HTMLAnchorElement)
   if (items.length === 0 || index === -1) return
 
   event.preventDefault()
@@ -432,7 +188,7 @@ function moveRovingFocus(event: KeyboardEvent<HTMLDivElement>, axis: 'x' | 'y'):
       ? items[0]
       : key === 'End'
         ? items[items.length - 1]
-        : items[(index + (key === nextKey ? 1 : -1) + items.length) % items.length]
+        : items[(index + (key === 'ArrowRight' ? 1 : -1) + items.length) % items.length]
 
   target?.focus()
   // 'nearest' on both axes: it must never drag the page around vertically.
@@ -440,73 +196,127 @@ function moveRovingFocus(event: KeyboardEvent<HTMLDivElement>, axis: 'x' | 'y'):
 }
 
 export type BookingFormProps = {
-  consultationSlug: string
-  /** From the database row; used for the Checkout modal's description line. */
-  consultationName: string
-  /** Gross, tax-inclusive total in paise, resolved by the server. Display only. */
-  totalPaise: number
-  initialSlots: readonly AvailableSlot[]
+  /** Every day with at least one open session, with its count. */
+  days: readonly AvailableDay[]
+  /** The day the server rendered, already validated against `days`. */
+  initialDate: string
+  /** That day's sessions, so the first paint needs no fetch. */
+  initialSessions: readonly AvailableSlot[]
+  /** A message from the no-JS round trip, already resolved to copy by the page. */
+  initialError?: string | null
 }
 
 export function BookingForm({
-  consultationSlug,
-  consultationName,
-  totalPaise,
-  initialSlots,
+  days: initialDays,
+  initialDate,
+  initialSessions,
+  initialError = null,
 }: BookingFormProps) {
   const uid = useId()
   const router = useRouter()
+  const formRef = useRef<HTMLFormElement | null>(null)
 
-  const [slots, setSlots] = useState<readonly AvailableSlot[]>(initialSlots)
-  const [slotsLoading, setSlotsLoading] = useState(false)
+  const [days, setDays] = useState<readonly AvailableDay[]>(initialDays)
+  const [selectedDate, setSelectedDate] = useState(initialDate)
+  const [sessionsByDate, setSessionsByDate] = useState<Record<string, readonly AvailableSlot[]>>(
+    initialDate.length > 0 ? { [initialDate]: initialSessions } : {},
+  )
+  const [loadingDate, setLoadingDate] = useState<string | null>(null)
+  const [dayError, setDayError] = useState<string | null>(null)
   const [selectedSlotId, setSelectedSlotId] = useState('')
-  const [selectedDayKey, setSelectedDayKey] = useState('')
-  const [status, setStatus] = useState<Status>('idle')
+  const [submitting, setSubmitting] = useState(false)
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({})
-  const [formError, setFormError] = useState<string | null>(null)
+  const [formError, setFormError] = useState<string | null>(initialError)
 
   const fieldId = useCallback((name: string) => `${uid}-${name}`, [uid])
-  const busy = status !== 'idle'
 
-  const groups = useMemo(() => groupSlotsByDay(slots), [slots])
-  const days = useMemo(() => buildDayStrip(groups), [groups])
+  const sessions = sessionsByDate[selectedDate]
+  const loading = loadingDate === selectedDate
+  const activeDay = days.find((day) => day.date === selectedDate)
+  const selectedSlot = (sessions ?? []).find((slot) => slot.id === selectedSlotId)
 
   /**
-   * Derived, not stored. The default is the first day that actually has slots,
-   * and a refetch that retires the chosen day falls back to that same default
-   * rather than leaving the strip pointing at a date it no longer offers.
+   * Native validation is turned OFF only once JavaScript is running.
+   *
+   * With JS the form shows its own inline errors, and the browser's bubbles
+   * would fire first and pre-empt them. Without JS those bubbles are the only
+   * thing standing between an empty form and a 400, so the attribute must not
+   * be in the server-rendered markup. Setting it here is the one honest way to
+   * have both.
    */
-  const activeDayKey = days.some((day) => day.key === selectedDayKey)
-    ? selectedDayKey
-    : (groups[0]?.key ?? '')
-  const activeDay = days.find((day) => day.key === activeDayKey)
-  const selectedSlot = slots.find((slot) => slot.id === selectedSlotId)
-  const selectedSummary =
-    selectedSlot === undefined
-      ? null
-      : `${fullDayFormat.format(keyToDate(dayKeyOf(selectedSlot.startsAt)))} · ${timeRangeOf(selectedSlot)} ${picker.zone}`
-
-  /* The strip's edge fades, shown only on the side there is more to scroll to. */
-  const stripRef = useRef<HTMLDivElement | null>(null)
-  const [stripEdges, setStripEdges] = useState({ start: false, end: false })
-
-  const measureStrip = useCallback(() => {
-    const el = stripRef.current
-    if (el === null) return
-    const overflow = el.scrollWidth - el.clientWidth
-    const start = el.scrollLeft > 4
-    const end = overflow > 4 && el.scrollLeft < overflow - 4
-    // Same object back when nothing moved: this runs on every scroll frame.
-    setStripEdges((current) =>
-      current.start === start && current.end === end ? current : { start, end },
-    )
+  useEffect(() => {
+    formRef.current?.setAttribute('novalidate', '')
   }, [])
 
+  /** Loads a day the cache has not seen. Deleting a cache entry re-runs this. */
   useEffect(() => {
-    measureStrip()
-    window.addEventListener('resize', measureStrip)
-    return () => window.removeEventListener('resize', measureStrip)
-  }, [measureStrip, days.length])
+    if (selectedDate.length === 0) return
+    if (sessionsByDate[selectedDate] !== undefined) return
+
+    let cancelled = false
+    setLoadingDate(selectedDate)
+
+    void (async () => {
+      try {
+        const response = await fetch(
+          `${SLOTS_ENDPOINT}?date=${encodeURIComponent(selectedDate)}`,
+          { cache: 'no-store' },
+        )
+        const payload: SessionsResponse = await response.json().catch(() => ({}))
+        if (cancelled) return
+
+        if (response.ok && payload.ok === true && Array.isArray(payload.sessions)) {
+          const fresh = payload.sessions
+          setSessionsByDate((current) => ({ ...current, [selectedDate]: fresh }))
+          // A refetch can retire the chosen time — do not keep posting an id
+          // that is no longer on offer.
+          setSelectedSlotId((current) =>
+            fresh.some((slot) => slot.id === current) ? current : '',
+          )
+          setDayError(null)
+        } else {
+          setDayError(picker.dayFailed)
+        }
+      } catch {
+        if (!cancelled) setDayError(picker.dayFailed)
+      } finally {
+        if (!cancelled) setLoadingDate(null)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [selectedDate, sessionsByDate])
+
+  const chooseDay = useCallback(
+    (event: MouseEvent<HTMLAnchorElement>, date: string) => {
+      // Let a modified click do what the visitor asked (new tab, new window).
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+      event.preventDefault()
+      if (submitting || date === selectedDate) return
+
+      setSelectedDate(date)
+      /**
+       * The chosen time is scoped to the visible day, and cleared when the day
+       * changes. It has to be: without JS a day is a page navigation, so the
+       * radio group is rebuilt from scratch — and the two paths must not
+       * disagree about what is selected.
+       */
+      setSelectedSlotId('')
+      setDayError(null)
+      setFieldErrors(({ slotId: _cleared, ...rest }) => rest)
+
+      // Keep the URL in step so a refresh, a bookmark or a shared link lands on
+      // the same day. replaceState rather than a router navigation: the page is
+      // already showing this day, and re-rendering the server component to say
+      // so would be a round trip for nothing.
+      if (typeof window !== 'undefined') {
+        window.history.replaceState(null, '', `${BOOK_PATH}?date=${encodeURIComponent(date)}`)
+      }
+    },
+    [selectedDate, submitting],
+  )
 
   const chooseSlot = useCallback((slotId: string) => {
     setSelectedSlotId(slotId)
@@ -514,142 +324,59 @@ export function BookingForm({
     setFormError(null)
   }, [])
 
-  /** Refetches the grid after a lost race, so the user picks from what is left. */
-  const refreshSlots = useCallback(async () => {
-    setSlotsLoading(true)
+  /**
+   * Refetches after a lost race, so the visitor picks from what is actually
+   * left. Dropping the day from the cache is what triggers the load effect; the
+   * strip's counts are refreshed alongside it, because the day that just filled
+   * up may now have nothing on it at all.
+   */
+  const refreshAvailability = useCallback(async (date: string) => {
+    setSessionsByDate((current) => {
+      const next = { ...current }
+      delete next[date]
+      return next
+    })
+
     try {
-      const response = await fetch(
-        `${SLOTS_ENDPOINT}?consultation=${encodeURIComponent(consultationSlug)}`,
-        { cache: 'no-store' },
-      )
-      const payload: SlotsResponse = await response.json().catch(() => ({}))
-      if (response.ok && payload.ok === true && Array.isArray(payload.slots)) {
-        setSlots(payload.slots)
-        setSelectedSlotId((current) =>
-          payload.slots?.some((slot) => slot.id === current) === true ? current : '',
-        )
+      const response = await fetch(SLOTS_ENDPOINT, { cache: 'no-store' })
+      const payload: DaysResponse = await response.json().catch(() => ({}))
+      if (response.ok && payload.ok === true && Array.isArray(payload.days)) {
+        setDays(payload.days)
       }
     } catch {
-      // The grid simply stays as it was; the error already shown is enough.
-    } finally {
-      setSlotsLoading(false)
+      // The strip stays as it was; the error already shown is enough.
     }
-  }, [consultationSlug])
+  }, [])
 
-  const handleCheckoutFailure = useCallback(
-    async (response: Response, payload: CheckoutResponse) => {
+  const handleFailure = useCallback(
+    async (response: Response, payload: BookResponse) => {
       if (payload.code === API_CODE.validation) {
         setFieldErrors(payload.fieldErrors ?? {})
         setFormError(errors.form.validation)
         return
       }
+
       if (payload.code === API_CODE.slotUnavailable) {
-        setFormError(errors.slot.taken)
-        await refreshSlots()
+        setFormError(
+          payload.reason === 'PAST'
+            ? errors.slot.past
+            : payload.reason === 'NOT_FOUND'
+              ? errors.slot.unavailable
+              : errors.slot.taken,
+        )
+        setSelectedSlotId('')
+        await refreshAvailability(selectedDate)
         return
       }
-      if (payload.code === API_CODE.slotInPast) {
-        setFormError(errors.slot.past)
-        await refreshSlots()
-        return
-      }
-      if (payload.code === API_CODE.consultationUnavailable) {
-        setFormError(errors.consultationType.unavailable)
-        return
-      }
-      if (payload.code === API_CODE.paymentUnavailable || payload.code === API_CODE.orderFailed) {
-        setFormError(errors.form.checkoutUnavailable)
-        return
-      }
+
       if (response.status === 429 || payload.code === API_CODE.rateLimited) {
         setFormError(errors.form.rateLimited)
         return
       }
+
       setFormError(errors.form.generic)
     },
-    [refreshSlots],
-  )
-
-  /** The browser half of the PAID transition. The webhook is the other half. */
-  const verifyPayment = useCallback(
-    async (bookingId: string, response: RazorpayHandlerResponse) => {
-      setStatus('verifying')
-      try {
-        const verified = await fetch(VERIFY_ENDPOINT, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...response, bookingId }),
-        })
-        const payload: { ok?: boolean } = await verified.json().catch(() => ({}))
-
-        if (verified.ok && payload.ok === true) {
-          router.push(`${SUCCESS_PATH}?booking=${encodeURIComponent(bookingId)}`)
-          return
-        }
-        setStatus('idle')
-        setFormError(errors.form.verificationFailed)
-      } catch {
-        setStatus('idle')
-        setFormError(errors.form.verificationFailed)
-      }
-    },
-    [router],
-  )
-
-  const openCheckout = useCallback(
-    (checkout: CheckoutResponse) => {
-      const constructor = window.Razorpay
-      const { orderId, amountPaise, currency, keyId, bookingId } = checkout
-
-      if (
-        constructor === undefined ||
-        orderId === undefined ||
-        amountPaise === undefined ||
-        currency === undefined ||
-        keyId === undefined ||
-        bookingId === undefined
-      ) {
-        setStatus('idle')
-        setFormError(errors.form.checkoutUnavailable)
-        return
-      }
-
-      const themeColor = checkoutThemeColor()
-      const instance = new constructor({
-        key: keyId,
-        // Paise, exactly as the server priced it. Never scaled here.
-        amount: amountPaise,
-        currency,
-        order_id: orderId,
-        name: siteConfig.name,
-        description: consultationName,
-        prefill: {
-          name: checkout.prefill?.name ?? '',
-          email: checkout.prefill?.email ?? '',
-          contact: checkout.prefill?.contact ?? '',
-        },
-        notes: { bookingId },
-        ...(themeColor.length > 0 ? { theme: { color: themeColor } } : {}),
-        handler: (response) => {
-          void verifyPayment(bookingId, response)
-        },
-        modal: {
-          ondismiss: () => {
-            setStatus('idle')
-            setFormError(errors.form.paymentCancelled)
-          },
-        },
-      })
-
-      instance.on?.('payment.failed', () => {
-        setStatus('idle')
-        setFormError(errors.form.paymentFailed)
-      })
-
-      setStatus('paying')
-      instance.open()
-    },
-    [consultationName, verifyPayment],
+    [refreshAvailability, selectedDate],
   )
 
   const handleSubmit = useCallback(
@@ -667,9 +394,9 @@ export function BookingForm({
       const email = read('email')
       const phone = read('phone')
       const company = read('company')
-      const clientStateCode = read('clientStateCode')
-      const clientGstin = read('clientGstin')
-      const notes = read('notes')
+      const message = read('message')
+      const consent = data.get('consent') !== null
+      const slot = (sessionsByDate[selectedDate] ?? []).find((one) => one.id === selectedSlotId)
 
       const localErrors: FieldErrors = {}
       if (name.length === 0) localErrors.name = errors.name.required
@@ -677,241 +404,203 @@ export function BookingForm({
       if (email.length === 0) localErrors.email = errors.email.required
       else if (!email.includes('@')) localErrors.email = errors.email.invalid
       if (phone.length === 0) localErrors.phone = errors.phone.required
-      if (clientStateCode.length === 0) localErrors.clientStateCode = errors.stateCode.required
-      if (selectedSlotId.length === 0) localErrors.slotId = errors.slot.required
+      if (slot === undefined) localErrors.slotId = errors.slot.required
+      if (!consent) localErrors.consent = errors.consent.required
 
-      if (Object.keys(localErrors).length > 0) {
+      if (Object.keys(localErrors).length > 0 || slot === undefined) {
         setFieldErrors(localErrors)
         setFormError(errors.form.validation)
         return
       }
 
-      setStatus('starting')
+      setSubmitting(true)
       setFieldErrors({})
       setFormError(null)
 
-      /**
-       * Script first, booking second. If checkout.js cannot load, nothing has
-       * been reserved and the slot is still on offer for everyone else.
-       */
-      const scriptReady = await loadCheckoutScript()
-      if (!scriptReady) {
-        setStatus('idle')
-        setFormError(errors.form.checkoutUnavailable)
-        return
-      }
-
       try {
-        const response = await fetch(CHECKOUT_ENDPOINT, {
+        const response = await fetch(BOOK_ENDPOINT, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             name,
             email,
             phone,
-            slotId: selectedSlotId,
-            consultationSlug,
-            clientStateCode,
+            slotId: slot.id,
             ...(company.length > 0 ? { company } : {}),
-            ...(clientGstin.length > 0 ? { clientGstin } : {}),
-            ...(notes.length > 0 ? { message: notes } : {}),
+            ...(message.length > 0 ? { message } : {}),
+            // Empty for a human. Declared so the strict schema accepts the key.
+            website: read('website'),
+            consent,
           }),
         })
 
-        const payload: CheckoutResponse = await response.json().catch(() => ({}))
+        const payload: BookResponse = await response.json().catch(() => ({}))
 
-        if (!response.ok || payload.ok !== true) {
-          setStatus('idle')
-          await handleCheckoutFailure(response, payload)
+        if (response.ok && payload.ok === true) {
+          /**
+           * The confirmed time comes from the session this form already has in
+           * hand, not from the response — which is exactly why the response can
+           * be identical for a real booking and a discarded bot submission.
+           */
+          const query = new URLSearchParams({ at: slot.startsAt, until: slot.endsAt })
+          router.push(`${SUCCESS_PATH}?${query.toString()}`)
           return
         }
 
-        openCheckout(payload)
+        setSubmitting(false)
+        await handleFailure(response, payload)
       } catch {
         // fetch() only rejects on a transport failure, never on a 4xx/5xx.
-        setStatus('idle')
+        setSubmitting(false)
         setFormError(errors.form.network)
       }
     },
-    [consultationSlug, handleCheckoutFailure, openCheckout, selectedSlotId],
+    [handleFailure, router, selectedDate, selectedSlotId, sessionsByDate],
   )
 
   return (
     <form
+      action={BOOK_ENDPOINT}
       // min-w-0: this <form> is a grid item, and grid items default to
       // min-width:auto — they refuse to shrink below their content. The day
       // strip inside is deliberately wider than the column, so without this a
       // single wide child blows the column out and the whole page gains a
       // horizontal scrollbar. The <fieldset> below needs it for the same
       // reason (fieldsets have their own intrinsic min-width quirk).
-      className="min-w-0 rounded-card border border-line bg-card p-7 shadow-[0_2px_10px_rgba(20,10,10,0.05)]"
-      noValidate
+      className="min-w-0 rounded-card border border-line bg-card p-6 shadow-[0_2px_10px_rgba(20,10,10,0.05)] sm:p-7"
+      method="post"
       onSubmit={handleSubmit}
+      ref={formRef}
     >
-      {/* ── slot picker ─────────────────────────────────────────────────── */}
+      {/* ── step 1 + 2: the day, then the time ──────────────────────────── */}
       <fieldset className="m-0 min-w-0 border-0 p-0">
-        <legend className="text-[13.5px] font-semibold">{picker.heading}</legend>
+        <legend className="font-display text-[17px] font-bold">{picker.heading}</legend>
         <p className={`${hintClass} mt-2`}>{picker.timezoneNote}</p>
 
-        {/*
-          The submitted value is read from state, not from the DOM — this only
-          keeps slotId in the form's own FormData, exactly as the radios did.
-        */}
-        <input name="slotId" type="hidden" value={selectedSlotId} />
-
-        {slotsLoading ? (
-          <div className="mt-4" role="status">
-            <p className={hintClass}>{picker.loading}</p>
-            <div aria-hidden className="mt-3 flex gap-2 overflow-hidden">
-              {[0, 1, 2, 3, 4, 5].map((n) => (
-                <span
-                  className="h-[76px] w-[64px] shrink-0 animate-pulse rounded-xl bg-card-2"
-                  key={n}
-                />
-              ))}
-            </div>
-            <div aria-hidden className="mt-5 flex max-w-[360px] flex-col gap-2">
-              {[0, 1, 2].map((n) => (
-                <span className="h-[46px] animate-pulse rounded-xl bg-card-2" key={n} />
-              ))}
-            </div>
-          </div>
-        ) : days.length === 0 ? (
+        {days.length === 0 ? (
           <div className={`${noticeClass} mt-4`}>
             <Icon className="mt-0.5 h-4 w-4 shrink-0 text-muted-2" name="calendar" />
-            <p className={hintClass}>{picker.empty}</p>
+            <div>
+              <p className={hintClass}>{picker.empty}</p>
+              <a className="mt-2 inline-block text-[12.5px] font-semibold text-red" href={ENQUIRY_HREF}>
+                {picker.emptyAction}
+              </a>
+            </div>
           </div>
         ) : (
           <>
-            {/* ── step 1: the day strip ──────────────────────────────────── */}
-            <div className="relative mt-4">
-              <div
-                aria-label={picker.dayGroupLabel}
-                className="flex snap-x snap-proximity gap-2 overflow-x-auto p-1 [scrollbar-color:var(--line-strong)_transparent] [scrollbar-width:thin]"
-                onKeyDown={(event) => moveRovingFocus(event, 'x')}
-                onScroll={measureStrip}
-                ref={stripRef}
-                role="group"
-              >
-                {days.map((day) => {
-                  const chosen = day.key === activeDayKey
-                  const count = day.slots.length
-                  const quiet = chosen ? 'text-white/75' : 'text-muted-2'
+            {/* The strip. Links, so a click without JS renders that day. */}
+            <div
+              aria-label={picker.dayGroupLabel}
+              className={`mt-4 flex snap-x snap-proximity gap-2 overflow-x-auto p-1 [scrollbar-color:var(--line-strong)_transparent] [scrollbar-width:thin] ${
+                submitting ? 'pointer-events-none opacity-55' : ''
+              }`}
+              onKeyDown={moveRovingFocus}
+              role="group"
+            >
+              {days.map((day) => {
+                const chosen = day.date === selectedDate
+                const quiet = chosen ? 'text-white/75' : 'text-muted-2'
 
-                  return (
-                    <button
-                      aria-pressed={chosen}
-                      className={`${dayChipClass} ${
-                        chosen
-                          ? chosenSurface
-                          : count === 0
-                            ? `${restingSurface} text-muted-2`
-                            : restingSurface
-                      }`}
-                      data-pick=""
-                      disabled={busy}
-                      key={day.key}
-                      onClick={() => setSelectedDayKey(day.key)}
-                      type="button"
+                return (
+                  <a
+                    aria-current={chosen ? 'date' : undefined}
+                    className={`${dayChipClass} ${chosen ? chosenFill : restingFill}`}
+                    data-pick=""
+                    href={`${BOOK_PATH}?date=${encodeURIComponent(day.date)}`}
+                    key={day.date}
+                    onClick={(event) => chooseDay(event, day.date)}
+                  >
+                    <span
+                      className={`text-[10.5px] font-semibold uppercase tracking-[0.09em] ${quiet}`}
                     >
-                      <span className={`text-[10.5px] font-semibold uppercase tracking-[0.09em] ${quiet}`}>
-                        {day.weekday}
-                      </span>
-                      <span className="font-display text-[19px] font-bold leading-none">
-                        {day.dayNumber}
-                      </span>
-                      <span className={`text-[10.5px] leading-none ${quiet}`}>{day.month}</span>
-                      {/* Density at a glance. The height is held either way so
-                          an empty day does not shorten its chip. */}
-                      <span aria-hidden className="flex h-[4px] items-center gap-[3px]">
-                        {Array.from({ length: Math.min(count, 3) }, (_, dot) => (
-                          <span
-                            className={`block h-[4px] w-[4px] rounded-full ${chosen ? 'bg-white/80' : 'bg-red/50'}`}
-                            key={dot}
-                          />
-                        ))}
-                      </span>
-                      <span className="sr-only">
-                        {count} {picker.openLabel}
-                      </span>
-                    </button>
-                  )
-                })}
-              </div>
-
-              {/* Only drawn on the side there is more strip to reach. */}
-              <div
-                aria-hidden
-                className="pointer-events-none absolute inset-y-0 left-0 w-10 transition-opacity duration-300"
-                style={{
-                  opacity: stripEdges.start ? 1 : 0,
-                  background: 'linear-gradient(90deg, var(--card), transparent)',
-                }}
-              />
-              <div
-                aria-hidden
-                className="pointer-events-none absolute inset-y-0 right-0 w-10 transition-opacity duration-300"
-                style={{
-                  opacity: stripEdges.end ? 1 : 0,
-                  background: 'linear-gradient(270deg, var(--card), transparent)',
-                }}
-              />
+                      {day.weekday}
+                    </span>
+                    <span className="font-display text-[19px] font-bold leading-none">
+                      {day.dayNumber}
+                    </span>
+                    <span className={`text-[10.5px] leading-none ${quiet}`}>{day.month}</span>
+                    {/* Density at a glance. The height is held either way so a
+                        quiet day does not shorten its chip. */}
+                    <span aria-hidden className="flex h-[4px] items-center gap-[3px]">
+                      {Array.from({ length: Math.min(day.count, 3) }, (_, dot) => (
+                        <span
+                          className={`block h-[4px] w-[4px] rounded-full ${chosen ? 'bg-white/80' : 'bg-red/50'}`}
+                          key={dot}
+                        />
+                      ))}
+                    </span>
+                    <span className="sr-only">
+                      {day.count} {picker.openLabel}
+                    </span>
+                  </a>
+                )
+              })}
             </div>
 
-            {/* ── step 2: the times on that day, and what the session is ─── */}
             <div className="mt-6 grid items-start gap-x-6 gap-y-5 md:grid-cols-2">
-              {activeDay === undefined ? null : (
-                <div className="min-w-0">
-                  <div className="flex items-baseline justify-between gap-3">
-                    <p className="text-[13.5px] font-semibold">{activeDay.full}</p>
-                    {activeDay.slots.length > 0 ? (
-                      <span className="text-[12px] text-muted-2">
-                        {activeDay.slots.length} {picker.openLabel}
-                      </span>
-                    ) : null}
-                  </div>
-
-                  {activeDay.slots.length === 0 ? (
-                    <div className={`${noticeClass} mt-3`}>
-                      <Icon className="mt-0.5 h-4 w-4 shrink-0 text-muted-2" name="calendar" />
-                      <p className={hintClass}>{picker.dayEmpty}</p>
-                    </div>
-                  ) : (
-                    <div
-                      aria-label={picker.timeGroupLabel}
-                      className="mt-2 flex max-h-[336px] flex-col gap-2 overflow-y-auto p-1 [scrollbar-color:var(--line-strong)_transparent] [scrollbar-width:thin]"
-                      onKeyDown={(event) => moveRovingFocus(event, 'y')}
-                      role="group"
-                    >
-                      {activeDay.slots.map((slot) => {
-                        const chosen = slot.id === selectedSlotId
-                        return (
-                          <button
-                            aria-pressed={chosen}
-                            className={`${timeRowClass} ${chosen ? `${chosenSurface} font-semibold` : `${restingSurface} text-ink`}`}
-                            data-pick=""
-                            disabled={busy}
-                            key={slot.id}
-                            onClick={() => chooseSlot(slot.id)}
-                            type="button"
-                          >
-                            {/* Held open when empty so the row never shifts. */}
-                            <span className="flex w-4 shrink-0 items-center justify-center">
-                              {chosen ? <Icon className="h-3.5 w-3.5" name="check" /> : null}
-                            </span>
-                            <span className="flex-1 text-left">{timeRangeOf(slot)}</span>
-                            <span
-                              className={`text-[11.5px] ${chosen ? 'text-white/75' : 'text-muted-2'}`}
-                            >
-                              {picker.zone}
-                            </span>
-                          </button>
-                        )
-                      })}
-                    </div>
-                  )}
+              <div className="min-w-0">
+                <div className="flex items-baseline justify-between gap-3">
+                  <p className="text-[13.5px] font-semibold">{activeDay?.full ?? ''}</p>
+                  {activeDay !== undefined && activeDay.count > 0 ? (
+                    <span className="text-[12px] text-muted-2">
+                      {activeDay.count} {picker.openLabel}
+                    </span>
+                  ) : null}
                 </div>
-              )}
+
+                {loading ? (
+                  <div className="mt-3" role="status">
+                    <p className={hintClass}>{picker.loading}</p>
+                    <div aria-hidden className="mt-3 flex flex-col gap-2">
+                      {[0, 1, 2].map((n) => (
+                        <span className="h-[46px] animate-pulse rounded-xl bg-card-2" key={n} />
+                      ))}
+                    </div>
+                  </div>
+                ) : sessions === undefined || sessions.length === 0 ? (
+                  <div className={`${noticeClass} mt-3`}>
+                    <Icon className="mt-0.5 h-4 w-4 shrink-0 text-muted-2" name="calendar" />
+                    <p className={hintClass}>{dayError ?? picker.dayEmpty}</p>
+                  </div>
+                ) : (
+                  <div
+                    aria-label={picker.timeGroupLabel}
+                    className="mt-2 flex max-h-[336px] flex-col gap-2 overflow-y-auto p-1 [scrollbar-color:var(--line-strong)_transparent] [scrollbar-width:thin]"
+                    role="radiogroup"
+                  >
+                    {sessions.map((slot) => (
+                      <label className={timeRowClass} key={slot.id}>
+                        <input
+                          checked={slot.id === selectedSlotId}
+                          className="sr-only"
+                          disabled={submitting}
+                          name="slotId"
+                          onChange={() => chooseSlot(slot.id)}
+                          required
+                          type="radio"
+                          value={slot.id}
+                        />
+                        {/* Held open when empty so the row never shifts. */}
+                        <span className="flex w-4 shrink-0 items-center justify-center opacity-0 transition-opacity duration-150 group-has-[:checked]:opacity-100">
+                          <Icon className="h-3.5 w-3.5" name="check" />
+                        </span>
+                        <span className="flex-1 text-left">{slot.time}</span>
+                        {slot.title ? (
+                          <span className="truncate text-[11.5px] opacity-70">{slot.title}</span>
+                        ) : null}
+                        <span className="text-[11.5px] opacity-70">{picker.zone}</span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+
+                {fieldErrors.slotId ? (
+                  <p className={`${errorClass} mt-3`} role="alert">
+                    {fieldErrors.slotId}
+                  </p>
+                ) : null}
+              </div>
 
               <div className="min-w-0 rounded-xl border border-line bg-bg-2 p-4">
                 <div className="flex items-start gap-3">
@@ -924,7 +613,19 @@ export function BookingForm({
                   </div>
                 </div>
 
-                {selectedSummary === null ? null : (
+                <div className="mt-4 flex items-start gap-3 border-t border-line pt-4">
+                  <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-red/10 text-red">
+                    <Icon className="h-4 w-4" name="sparkle" />
+                  </span>
+                  <div>
+                    <p className="text-[13px] font-semibold">{bookingContent.hero.badge}</p>
+                    <p className="mt-1 text-[12.5px] leading-[1.55] text-muted">
+                      {picker.freeNote}
+                    </p>
+                  </div>
+                </div>
+
+                {selectedSlot === undefined ? null : (
                   <div className="mt-4 flex items-start gap-3 border-t border-line pt-4">
                     <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-red/10 text-red">
                       <Icon className="h-4 w-4" name="calendar" />
@@ -933,7 +634,7 @@ export function BookingForm({
                       <p className="text-[11px] font-semibold uppercase tracking-[0.09em] text-muted-2">
                         {picker.selectedLabel}
                       </p>
-                      <p className="mt-1 text-[13.5px] font-semibold">{selectedSummary}</p>
+                      <p className="mt-1 text-[13.5px] font-semibold">{selectedSlot.label}</p>
                     </div>
                   </div>
                 )}
@@ -941,190 +642,155 @@ export function BookingForm({
             </div>
           </>
         )}
-
-        {fieldErrors.slotId ? (
-          <p className={`${errorClass} mt-3`} role="alert">
-            {fieldErrors.slotId}
-          </p>
-        ) : null}
       </fieldset>
 
-      {/* ── details ─────────────────────────────────────────────────────── */}
-      <div className="mt-8 grid gap-5 sm:grid-cols-2">
-        <Field
-          error={fieldErrors.name}
-          hint={fields.name.helper}
-          id={fieldId('name')}
-          label={fields.name.label}
-        >
-          <input
-            aria-describedby={describedBy(fieldId('name'), fieldErrors.name, fields.name.helper)}
-            aria-invalid={fieldErrors.name !== undefined}
-            autoComplete="name"
-            className={controlClass}
-            disabled={busy}
-            id={fieldId('name')}
-            name="name"
-            placeholder={fields.name.placeholder}
-            type="text"
-          />
-        </Field>
+      {/* ── step 3: who is coming ───────────────────────────────────────── */}
+      <div className="mt-9 border-t border-line pt-7">
+        <h3 className="font-display text-[17px] font-bold">{details.heading}</h3>
+        <p className={`${hintClass} mt-2`}>{details.sub}</p>
 
-        <Field
-          error={fieldErrors.email}
-          hint={fields.email.helper}
-          id={fieldId('email')}
-          label={fields.email.label}
-        >
-          <input
-            aria-describedby={describedBy(fieldId('email'), fieldErrors.email, fields.email.helper)}
-            aria-invalid={fieldErrors.email !== undefined}
-            autoComplete="email"
-            className={controlClass}
-            disabled={busy}
-            id={fieldId('email')}
-            name="email"
-            placeholder={fields.email.placeholder}
-            type="email"
-          />
-        </Field>
-
-        <Field
-          error={fieldErrors.phone}
-          hint={fields.phone.helper}
-          id={fieldId('phone')}
-          label={fields.phone.label}
-        >
-          <input
-            aria-describedby={describedBy(fieldId('phone'), fieldErrors.phone, fields.phone.helper)}
-            aria-invalid={fieldErrors.phone !== undefined}
-            autoComplete="tel"
-            className={controlClass}
-            disabled={busy}
-            id={fieldId('phone')}
-            name="phone"
-            placeholder={fields.phone.placeholder}
-            type="tel"
-          />
-        </Field>
-
-        <Field
-          error={fieldErrors.company}
-          hint={fields.company.helper}
-          id={fieldId('company')}
-          label={fields.company.label}
-          optionalTag={fields.company.optionalTag}
-        >
-          <input
-            aria-describedby={describedBy(
-              fieldId('company'),
-              fieldErrors.company,
-              fields.company.helper,
-            )}
-            aria-invalid={fieldErrors.company !== undefined}
-            autoComplete="organization"
-            className={controlClass}
-            disabled={busy}
-            id={fieldId('company')}
-            name="company"
-            placeholder={fields.company.placeholder}
-            type="text"
-          />
-        </Field>
-
-        {/*
-          The billing state is not an address field. It is the place-of-supply
-          input (IGST Act s.12(2)) that decides whether the invoice carries
-          CGST+SGST or IGST, which is what the helper line explains.
-        */}
-        <Field
-          error={fieldErrors.clientStateCode}
-          hint={fields.stateCode.helper}
-          id={fieldId('stateCode')}
-          label={fields.stateCode.label}
-        >
-          <select
-            aria-describedby={describedBy(
-              fieldId('stateCode'),
-              fieldErrors.clientStateCode,
-              fields.stateCode.helper,
-            )}
-            aria-invalid={fieldErrors.clientStateCode !== undefined}
-            className={controlClass}
-            defaultValue=""
-            disabled={busy}
-            id={fieldId('stateCode')}
-            name="clientStateCode"
-          >
-            <option disabled value="">
-              {fields.stateCode.placeholder}
-            </option>
-            {indianStates.map((state) => (
-              <option key={state.code} value={state.code}>
-                {state.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-
-        <Field
-          error={fieldErrors.clientGstin}
-          hint={fields.gstin.helper}
-          id={fieldId('gstin')}
-          label={fields.gstin.label}
-          optionalTag={fields.gstin.optionalTag}
-        >
-          <input
-            aria-describedby={describedBy(
-              fieldId('gstin'),
-              fieldErrors.clientGstin,
-              fields.gstin.helper,
-            )}
-            aria-invalid={fieldErrors.clientGstin !== undefined}
-            autoCapitalize="characters"
-            className={`${controlClass} uppercase`}
-            disabled={busy}
-            id={fieldId('gstin')}
-            name="clientGstin"
-            placeholder={fields.gstin.placeholder}
-            type="text"
-          />
-        </Field>
-
-        <div className="sm:col-span-2">
+        <div className="mt-5 grid gap-5 sm:grid-cols-2">
           <Field
-            error={fieldErrors.message}
-            hint={fields.notes.helper}
-            id={fieldId('notes')}
-            label={fields.notes.label}
-            optionalTag={fields.notes.optionalTag}
+            error={fieldErrors.name}
+            hint={fields.name.helper}
+            id={fieldId('name')}
+            label={fields.name.label}
           >
-            <textarea
-              aria-describedby={describedBy(
-                fieldId('notes'),
-                fieldErrors.message,
-                fields.notes.helper,
-              )}
-              aria-invalid={fieldErrors.message !== undefined}
-              className={`${controlClass} min-h-[120px] resize-y`}
-              disabled={busy}
-              id={fieldId('notes')}
-              name="notes"
-              placeholder={fields.notes.placeholder}
-              rows={4}
+            <input
+              aria-describedby={describedBy(fieldId('name'), fieldErrors.name, fields.name.helper)}
+              aria-invalid={fieldErrors.name !== undefined}
+              autoComplete="name"
+              className={controlClass}
+              disabled={submitting}
+              id={fieldId('name')}
+              name="name"
+              placeholder={fields.name.placeholder}
+              required
+              type="text"
             />
           </Field>
+
+          <Field
+            error={fieldErrors.email}
+            hint={fields.email.helper}
+            id={fieldId('email')}
+            label={fields.email.label}
+          >
+            <input
+              aria-describedby={describedBy(
+                fieldId('email'),
+                fieldErrors.email,
+                fields.email.helper,
+              )}
+              aria-invalid={fieldErrors.email !== undefined}
+              autoComplete="email"
+              className={controlClass}
+              disabled={submitting}
+              id={fieldId('email')}
+              name="email"
+              placeholder={fields.email.placeholder}
+              required
+              type="email"
+            />
+          </Field>
+
+          <Field
+            error={fieldErrors.phone}
+            hint={fields.phone.helper}
+            id={fieldId('phone')}
+            label={fields.phone.label}
+          >
+            <input
+              aria-describedby={describedBy(
+                fieldId('phone'),
+                fieldErrors.phone,
+                fields.phone.helper,
+              )}
+              aria-invalid={fieldErrors.phone !== undefined}
+              autoComplete="tel"
+              className={controlClass}
+              disabled={submitting}
+              id={fieldId('phone')}
+              name="phone"
+              placeholder={fields.phone.placeholder}
+              required
+              type="tel"
+            />
+          </Field>
+
+          <Field
+            error={fieldErrors.company}
+            hint={fields.company.helper}
+            id={fieldId('company')}
+            label={fields.company.label}
+            optionalTag={fields.company.optionalTag}
+          >
+            <input
+              aria-describedby={describedBy(
+                fieldId('company'),
+                fieldErrors.company,
+                fields.company.helper,
+              )}
+              aria-invalid={fieldErrors.company !== undefined}
+              autoComplete="organization"
+              className={controlClass}
+              disabled={submitting}
+              id={fieldId('company')}
+              name="company"
+              placeholder={fields.company.placeholder}
+              type="text"
+            />
+          </Field>
+
+          <div className="sm:col-span-2">
+            <Field
+              error={fieldErrors.message}
+              hint={fields.message.helper}
+              id={fieldId('message')}
+              label={fields.message.label}
+              optionalTag={fields.message.optionalTag}
+            >
+              <textarea
+                aria-describedby={describedBy(
+                  fieldId('message'),
+                  fieldErrors.message,
+                  fields.message.helper,
+                )}
+                aria-invalid={fieldErrors.message !== undefined}
+                className={`${controlClass} min-h-[120px] resize-y`}
+                disabled={submitting}
+                id={fieldId('message')}
+                name="message"
+                placeholder={fields.message.placeholder}
+                rows={4}
+              />
+            </Field>
+          </div>
         </div>
       </div>
 
-      {/* ── total + consent + submit ────────────────────────────────────── */}
-      <div className="mt-8 flex items-baseline justify-between gap-4 border-t border-line pt-5">
-        <span className="text-[13.5px] font-semibold">{summary.total}</span>
-        <span className="font-display text-[22px] font-bold">{formatINR(totalPaise)}</span>
-      </div>
-      <p className={`${hintClass} mt-2`}>{summary.inclusiveNote}</p>
+      {/* ── consent + submit ────────────────────────────────────────────── */}
+      <label
+        className="mt-7 flex cursor-pointer items-start gap-3 text-[13px] text-muted"
+        htmlFor={fieldId('consent')}
+      >
+        <input
+          aria-invalid={fieldErrors.consent !== undefined}
+          className="mt-1 h-4 w-4 flex-shrink-0 accent-red"
+          disabled={submitting}
+          id={fieldId('consent')}
+          name="consent"
+          required
+          type="checkbox"
+        />
+        <span>{bookingContent.consent}</span>
+      </label>
 
-      <p className="mt-5 text-[12.5px] text-muted">{bookingForm.consent}</p>
+      {fieldErrors.consent ? (
+        <p className={`${errorClass} mt-2`} role="alert">
+          {fieldErrors.consent}
+        </p>
+      ) : null}
 
       {formError ? (
         <p className={`${errorClass} mt-5`} role="alert">
@@ -1132,20 +798,29 @@ export function BookingForm({
         </p>
       ) : null}
 
+      {/*
+        Never disabled on anything but `submitting`. Gating it on a consent
+        checkbox tracked in React state would render it disabled on the server
+        too, which would leave a visitor with no JavaScript looking at a button
+        that can never be pressed.
+      */}
       <button
         className="btn mt-6 w-full disabled:cursor-not-allowed disabled:opacity-55 sm:w-auto"
-        disabled={busy}
+        disabled={submitting}
         type="submit"
       >
-        {busy ? bookingForm.submit.pending : bookingForm.submit.idle}
+        {submitting ? bookingContent.submit.pending : bookingContent.submit.idle}
       </button>
 
-      {status === 'verifying' ? (
-        <div className="mt-5 rounded-xl border border-line bg-bg-2 p-4" role="status">
-          <p className="text-[13.5px] font-semibold">{bookingForm.paying.title}</p>
-          <p className={`${hintClass} mt-1`}>{bookingForm.paying.body}</p>
-        </div>
-      ) : null}
+      <p className={`${hintClass} mt-3`}>{picker.freeNote}</p>
+
+      {/*
+        Honeypot. Off-screen, hidden from assistive technology, skipped by the
+        tab order and excluded from autofill — a human never sees or fills it.
+      */}
+      <div aria-hidden="true" className="absolute left-[-9999px] h-0 w-0 overflow-hidden">
+        <input autoComplete="off" name="website" tabIndex={-1} type="text" />
+      </div>
     </form>
   )
 }

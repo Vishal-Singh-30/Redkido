@@ -1,9 +1,12 @@
 # Redkido Consultancy
 
-Marketing site, consultation booking and admin for Redkido Consultancy.
+Marketing site, free call booking and admin for Redkido Consultancy.
 
 Next 16 (App Router) · React 19 · TypeScript strict · Tailwind v4 (CSS `@theme`, no
-`tailwind.config.js`) · Prisma 7 with `@prisma/adapter-pg` · Razorpay · Resend.
+`tailwind.config.js`) · Prisma 7 with `@prisma/adapter-pg` · Resend · Google Calendar.
+
+Booking a call is **free** — there is no payment step, no gateway and no invoicing
+anywhere in this codebase.
 
 ---
 
@@ -28,7 +31,7 @@ npm run db:up
 ```bash
 # 4. Back in the first terminal
 npm run db:local                  # applies prisma/migrations to PGlite
-npm run db:seed                   # admin user + consultation catalogue + slots
+npm run db:seed                   # admin user + a rolling window of bookable sessions
 npm run dev                       # http://localhost:3000
 ```
 
@@ -78,13 +81,13 @@ against the Supabase pooler.
 
 The entire admin — auth, leads, bookings, slot management — can be built and
 exercised against PGlite alone. You do not need Supabase, and you do not need
-Razorpay or Resend credentials: with those keys empty (as they are in
-`.env.local`) the app runs in a degraded-but-working mode where pages render and
-the admin is fully usable, while checkout and transactional email are disabled
-rather than throwing.
+Resend or Google credentials: with those keys empty (as they are in `.env.local`)
+the app runs in a degraded-but-working mode. Calls can still be booked and the
+admin is fully usable; the confirmation email and the Google Meet link are simply
+skipped rather than throwing.
 
-Paste Razorpay **test** keys and a Resend key into `.env.local` only when you are
-actually exercising payment or email.
+Paste a Resend key or Google OAuth credentials into `.env.local` only when you
+are actually exercising email or Meet links.
 
 ---
 
@@ -110,9 +113,9 @@ money, slot or validation code.
 
 | Script | Proves |
 | --- | --- |
-| `npx tsx scripts/tax-invariant-test.ts` | `taxable + cgst + sgst + igst === total` over 60,000 amounts; the full place-of-supply table; GSTIN checksum |
-| `npx tsx scripts/slot-lifecycle-test.ts` | Holds expire, stale holds are reclaimed, a resold slot is detected at capture, and Postgres refuses a second PAID booking on one slot |
-| `npx tsx scripts/validation-check.ts` | An injected `pricePaise`/`amount` field is REJECTED, not ignored; bad state codes and GSTINs are errors, not silent fall-throughs |
+| `npx tsx scripts/slot-lifecycle-test.ts` | the transactional row lock, past/blocked sessions, and the database double-book guard |
+| `npx tsx scripts/slot-lifecycle-test.ts` | The row lock rejects taken, blocked and past sessions; Postgres refuses a second CONFIRMED booking on one session |
+| `npx tsx scripts/validation-check.ts` | `.strict()` rejects any field the client invents; the honeypot works |
 | `node scripts/content-fidelity.mjs <clean.html>` | Every user-facing string from the original HTML still exists in `src/content` |
 
 ---
@@ -130,21 +133,23 @@ Supabase, 5433 for local PGlite. The transaction pooler (6543) is for the runnin
 app only; `prisma migrate` needs prepared statements and advisory locks it does
 not provide.
 
-**Money is integer paise.** Everywhere — DB columns, Razorpay orders, invoices,
-emails. No floats, no `parseFloat` on an amount. Rupees exist only for display,
-via `formatINR()` in `src/lib/money.ts`.
+**The slot race is real even without payment.** Two visitors can pick the same
+session seconds apart, so `lockSlotForBooking` takes `SELECT ... FOR UPDATE`
+inside the booking transaction, and a partial unique index
+(`WHERE status = 'CONFIRMED'`) makes Postgres refuse a double-book regardless.
+It is partial on purpose: cancelling a booking frees the session again.
 
-**Copy lives in data, not components.** Every user-facing string, price and list
-is in `src/content/*.ts` or `src/config/site.ts`. Components read them.
+**Copy lives in data, not components.** Every user-facing string and list is in
+`src/content/*.ts` or `src/config/site.ts`. Components read them.
 
-**The seed is idempotent.** It upserts the admin (re-applying `ADMIN_PASSWORD`),
-upserts consultation types from `src/content/consultations.ts`, and tops up a
-rolling 21-day window of `AVAILABLE` weekday slots at 11:00 / 14:00 / 16:00 IST,
-skipping any that already exist.
+**The seed is idempotent.** It upserts the admin (re-applying `ADMIN_PASSWORD`)
+and tops up a rolling 21-day window of `AVAILABLE` weekday sessions at 11:00 /
+14:00 / 16:00 IST, skipping any that already exist. Publish more from
+`/admin/sessions` — the site cannot take a booking for a day with no sessions.
 
 ---
 
 ## Deployment
 
-Not covered here — see the go-live runbook for Vercel, Supabase, Razorpay
-webhooks, DNS and the GST/invoice sign-off checklist.
+Not covered here — see [DEPLOYMENT.md](DEPLOYMENT.md) for Supabase, Vercel, DNS,
+Resend and Google Meet.

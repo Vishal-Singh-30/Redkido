@@ -33,9 +33,6 @@ export default async function SettingsPage({ searchParams }: { searchParams: Sea
   const meetingLinkTemplate = values.get(SETTING_KEYS.meetingLinkTemplate) ?? ''
   const ownerAlertEmail = values.get(SETTING_KEYS.ownerAlertEmail) ?? ''
 
-  const gst = adminCopy.settings.gst
-  const supplierGstin = siteConfig.tax.supplierGstin
-
   return (
     <>
       <PageHeader title={adminCopy.settings.title} description={adminCopy.settings.description} />
@@ -87,40 +84,6 @@ export default async function SettingsPage({ searchParams }: { searchParams: Sea
           </form>
         </Panel>
 
-        <Panel title={gst.title} description={gst.description}>
-          <DataGrid>
-            <DataRow label={gst.rate} value={`${siteConfig.tax.gstRatePercent}%`} />
-            <DataRow label={gst.sac} value={siteConfig.tax.sacCode} />
-            <DataRow label={gst.supplierState} value={siteConfig.tax.supplierStateName} />
-            <DataRow label={gst.supplierStateCode} value={siteConfig.tax.supplierStateCode} />
-            <DataRow
-              label={gst.supplierGstin}
-              value={
-                supplierGstin.length > 0 ? (
-                  <code className="text-xs">{supplierGstin}</code>
-                ) : (
-                  <span className="font-semibold text-red">{gst.gstinMissing}</span>
-                )
-              }
-            />
-            <DataRow
-              label={gst.registered}
-              value={siteConfig.tax.registered ? gst.registeredYes : gst.registeredNo}
-            />
-            <DataRow
-              label={gst.pricesIncludeTax}
-              value={siteConfig.tax.pricesIncludeTax ? gst.registeredYes : gst.registeredNo}
-            />
-            <DataRow label={gst.invoicePrefix} value={siteConfig.invoice.prefix} />
-          </DataGrid>
-
-          <p className="mt-5 text-xs text-muted-2">{gst.sacNote}</p>
-
-          <div className="mt-5 rounded-card border border-red/40 bg-red/8 p-4">
-            <p className="font-display text-sm font-bold text-red-deep">{gst.warningTitle}</p>
-            <p className="mt-2 text-sm text-ink">{gst.warningBody}</p>
-          </div>
-        </Panel>
       </div>
     </>
   )

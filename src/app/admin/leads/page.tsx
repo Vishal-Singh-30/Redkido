@@ -1,6 +1,14 @@
+/**
+ * /admin/leads — one list for everyone who reached out.
+ *
+ * Both funnels still land in one table; only the badge changed. It used to say
+ * Enquiry / Consultation and carry an Amount column, and now it says Enquiry /
+ * Call and carries the session that was booked, because that — not a figure —
+ * is what an admin needs to see at a glance next to a name.
+ */
+
 import Link from 'next/link'
 import { prisma } from '@/lib/prisma'
-import { formatINR } from '@/lib/money'
 import {
   EmptyState,
   KindBadge,
@@ -10,10 +18,13 @@ import {
   PageHeader,
   Panel,
   adminCopy,
+  fieldClass,
+  fieldLabelClass,
   formatDateTime,
   formatText,
   isLeadKind,
   isLeadStatus,
+  primaryButtonClass,
   type LeadKindValue,
   type LeadStatusValue,
 } from '@/components/admin/shell'
@@ -94,7 +105,7 @@ export default async function LeadsPage({ searchParams }: { searchParams: Search
       phone: true,
       company: true,
       createdAt: true,
-      booking: { select: { status: true, totalPaise: true } },
+      booking: { select: { status: true, slot: { select: { startsAt: true } } } },
     },
   })
 
@@ -114,19 +125,16 @@ export default async function LeadsPage({ searchParams }: { searchParams: Search
 
       <Panel className="mb-6">
         <form method="get" action="/admin/leads">
-          <fieldset className="flex flex-wrap items-end gap-4">
+          {/* min-w-0: a fieldset will not shrink below its content, and one wide
+              child then gives the whole page a horizontal scrollbar. */}
+          <fieldset className="flex min-w-0 flex-wrap items-end gap-4">
             <legend className="sr-only">{adminCopy.leads.filters.legend}</legend>
 
             <div className="flex flex-col gap-1.5">
-              <label htmlFor="filter-kind" className="text-xs font-semibold text-muted-2 uppercase">
+              <label htmlFor="filter-kind" className={fieldLabelClass}>
                 {adminCopy.leads.filters.kind}
               </label>
-              <select
-                id="filter-kind"
-                name="kind"
-                defaultValue={kind ?? ''}
-                className="rounded-lg border border-line-strong bg-bg px-3 py-2 text-sm text-ink"
-              >
+              <select id="filter-kind" name="kind" defaultValue={kind ?? ''} className={fieldClass}>
                 <option value="">{adminCopy.leads.filters.anyKind}</option>
                 {LEAD_KINDS.map((value) => (
                   <option key={value} value={value}>
@@ -137,15 +145,10 @@ export default async function LeadsPage({ searchParams }: { searchParams: Search
             </div>
 
             <div className="flex flex-col gap-1.5">
-              <label htmlFor="filter-status" className="text-xs font-semibold text-muted-2 uppercase">
+              <label htmlFor="filter-status" className={fieldLabelClass}>
                 {adminCopy.leads.filters.status}
               </label>
-              <select
-                id="filter-status"
-                name="status"
-                defaultValue={status ?? ''}
-                className="rounded-lg border border-line-strong bg-bg px-3 py-2 text-sm text-ink"
-              >
+              <select id="filter-status" name="status" defaultValue={status ?? ''} className={fieldClass}>
                 <option value="">{adminCopy.leads.filters.anyStatus}</option>
                 {LEAD_STATUSES.map((value) => (
                   <option key={value} value={value}>
@@ -156,7 +159,7 @@ export default async function LeadsPage({ searchParams }: { searchParams: Search
             </div>
 
             <div className="flex min-w-56 flex-1 flex-col gap-1.5">
-              <label htmlFor="filter-q" className="text-xs font-semibold text-muted-2 uppercase">
+              <label htmlFor="filter-q" className={fieldLabelClass}>
                 {adminCopy.leads.filters.search}
               </label>
               <input
@@ -165,15 +168,12 @@ export default async function LeadsPage({ searchParams }: { searchParams: Search
                 type="search"
                 defaultValue={query}
                 placeholder={adminCopy.leads.filters.searchPlaceholder}
-                className="rounded-lg border border-line-strong bg-bg px-3 py-2 text-sm text-ink placeholder:text-muted-2"
+                className={fieldClass}
               />
             </div>
 
             <div className="flex items-center gap-3">
-              <button
-                type="submit"
-                className="rounded-full bg-red px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-2"
-              >
+              <button type="submit" className={primaryButtonClass}>
                 {adminCopy.common.apply}
               </button>
               <Link href="/admin/leads" className="text-sm font-semibold text-muted hover:text-ink">
@@ -206,8 +206,8 @@ export default async function LeadsPage({ searchParams }: { searchParams: Search
                 <th scope="col" className="px-4 py-3 font-semibold">
                   {adminCopy.leads.columns.status}
                 </th>
-                <th scope="col" className="px-4 py-3 text-right font-semibold">
-                  {adminCopy.leads.columns.amount}
+                <th scope="col" className="px-4 py-3 font-semibold">
+                  {adminCopy.leads.columns.session}
                 </th>
                 <th scope="col" className="px-4 py-3 font-semibold">
                   {adminCopy.leads.columns.created}
@@ -232,10 +232,14 @@ export default async function LeadsPage({ searchParams }: { searchParams: Search
                   <td className="px-4 py-3">
                     <LeadStatusBadge status={lead.status} />
                   </td>
-                  <td className="px-4 py-3 text-right whitespace-nowrap text-ink">
-                    {lead.booking ? formatINR(lead.booking.totalPaise) : adminCopy.common.empty}
+                  <td className="px-4 py-3 whitespace-nowrap text-muted">
+                    {lead.booking
+                      ? formatDateTime(lead.booking.slot.startsAt)
+                      : adminCopy.common.empty}
                   </td>
-                  <td className="px-4 py-3 whitespace-nowrap text-muted-2">{formatDateTime(lead.createdAt)}</td>
+                  <td className="px-4 py-3 whitespace-nowrap text-muted-2">
+                    {formatDateTime(lead.createdAt)}
+                  </td>
                   <td className="px-4 py-3 text-right">
                     <Link
                       href={`/admin/leads/${lead.id}`}
@@ -251,7 +255,10 @@ export default async function LeadsPage({ searchParams }: { searchParams: Search
         </div>
       )}
 
-      <nav className="mt-6 flex items-center justify-between gap-4" aria-label={adminCopy.leads.pagination.pageLabel}>
+      <nav
+        className="mt-6 flex items-center justify-between gap-4"
+        aria-label={adminCopy.leads.pagination.pageLabel}
+      >
         {page > 1 ? (
           <Link
             href={buildQuery({ kind, status, q: query, page: page - 1 })}

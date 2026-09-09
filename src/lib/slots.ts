@@ -263,6 +263,11 @@ export function formatSlotLabel(startsAt: Date, endsAt: Date): string {
   }
 }
 
+/** The same label for a single instant, when no end time is available. */
+export function formatSlotStart(startsAt: Date): string {
+  return fullLabelFormat.format(startsAt)
+}
+
 /**
  * "10:00 – 10:45 am" — the clock range only; the day is established by the
  * heading above the list.

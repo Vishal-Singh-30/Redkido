@@ -130,7 +130,7 @@ function parseTimeList(raw: string): string[] {
  * weekday set and an unparseable time list are ordinary mistakes, and "check
  * everything" is a useless thing to tell someone about either.
  */
-function codeForIssue(error: z.ZodError): SessionErrorCode {
+function codeForIssue(error: { issues: readonly { path: readonly PropertyKey[] }[] }): SessionErrorCode {
   const field = error.issues[0]?.path[0]
   if (field === 'weekdays') return 'weekdays'
   if (field === 'times') return 'times'
@@ -161,14 +161,20 @@ function isUniqueViolation(error: unknown): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002'
 }
 
-/** Every IST calendar day from `from` to `to` inclusive, or null if inverted. */
-function eachDayKey(from: string, to: string): string[] | null {
+/**
+ * Every IST calendar day from `from` to `to` inclusive.
+ *
+ * The two failure modes are told apart because they need different sentences:
+ * "2026-13-45" passes the shape regex but is not a date, and an end before a
+ * start is an ordinary mistake with its own message.
+ */
+function eachDayKey(from: string, to: string): string[] | 'invalid' | 'inverted' {
   // Anchored at UTC noon so adding exactly 24h can never land on the previous
   // or next calendar date, whatever the runtime's zone.
   const start = Date.parse(`${from}T12:00:00.000Z`)
   const end = Date.parse(`${to}T12:00:00.000Z`)
-  if (Number.isNaN(start) || Number.isNaN(end)) return null
-  if (end < start) return null
+  if (Number.isNaN(start) || Number.isNaN(end)) return 'invalid'
+  if (end < start) return 'inverted'
 
   const days: string[] = []
   for (let time = start; time <= end; time += MS_PER_DAY) {
@@ -247,7 +253,8 @@ export async function createSessionRangeAction(formData: FormData): Promise<void
   const { from, to, weekdays, times, durationMinutes, label } = parsed.data
 
   const days = eachDayKey(from, to)
-  if (!days) fail('range')
+  if (days === 'invalid') fail('invalid')
+  if (days === 'inverted') fail('range')
   if (days.length > MAX_RANGE_DAYS) fail('rangeTooLong')
 
   const wanted = new Set(weekdays)
@@ -358,37 +365,33 @@ export async function deleteSessionAction(formData: FormData): Promise<void> {
 
   const { slotId } = parsed.data
 
-  let outcome: SessionErrorCode | null = null
+  // The transaction RETURNS its verdict rather than assigning to a captured
+  // variable: TypeScript does not track assignments made inside a callback, so
+  // a captured flag would type as `null` out here and the checks below would be
+  // quietly meaningless.
+  let outcome: 'ok' | SessionErrorCode
   try {
-    await prisma.$transaction(async (tx) => {
+    outcome = await prisma.$transaction(async (tx): Promise<'ok' | SessionErrorCode> => {
       // The same lock lockSlotForBooking() takes. A booking committing right
       // now holds it, so we queue behind that commit and then see its booking.
       const locked = await tx.$queryRaw<{ id: string }[]>`
         SELECT id FROM "Slot" WHERE id = ${slotId} FOR UPDATE
       `
-      if (locked.length === 0) {
-        outcome = 'notFound'
-        return
-      }
+      if (locked.length === 0) return 'notFound'
 
       const bookings = await tx.booking.findMany({ where: { slotId }, select: { status: true } })
-      if (bookings.some((booking) => booking.status === 'CONFIRMED')) {
-        outcome = 'booked'
-        return
-      }
-      if (bookings.length > 0) {
-        // Cancelled or completed bookings still reference this row. Deleting it
-        // would erase the record of a call that happened.
-        outcome = 'hasHistory'
-        return
-      }
+      if (bookings.some((booking) => booking.status === 'CONFIRMED')) return 'booked'
+      // Cancelled, completed or no-show bookings still reference this row.
+      // Deleting it would erase the record of a call that really happened.
+      if (bookings.length > 0) return 'hasHistory'
 
       await tx.slot.delete({ where: { id: slotId } })
+      return 'ok'
     })
   } catch {
     outcome = 'generic'
   }
 
-  if (outcome) fail(outcome)
+  if (outcome !== 'ok') fail(outcome)
   succeed('deleted')
 }
