@@ -389,13 +389,37 @@
      ========================================================================== */
 
   header{
-    /* The float inset. Constant, so the header's height never changes and the
-       page below it never moves. */
+    /*
+      FIXED, not sticky.
+      A sticky header still occupies its height in normal flow, so the hero
+      began 98px down the page and the page background showed through that gap
+      as a white band behind the pill. Fixed takes the header out of flow
+      entirely: the hero now starts at y=0 and its gradient runs behind the pill,
+      which is the whole point of a floating header.
+    */
+    position:fixed;
+    top:0;
+    left:0;
+    right:0;
+    /* The float inset. Constant, so the pill never moves. */
     padding:14px 0;
     /* The full-bleed bar is gone; the nav itself is the only surface. */
     background:transparent;
     border-bottom-color:transparent;
     backdrop-filter:none;
+  }
+
+  /*
+    The header no longer reserves space, so pages have to. The hero is the
+    exception — it deliberately runs UNDER the header and pads its own content
+    clear of it, so the gradient is full-bleed from the very top of the page.
+  */
+  main{padding-top:var(--header-h);}
+  main:has(> .hero:first-child){padding-top:0;}
+  main:has(> .hero:first-child) > .hero{
+    /* Original spacing preserved: the old 86px bar + 100px hero padding put the
+       eyebrow 186px down, and this reproduces that from a y=0 start. */
+    padding-top:calc(var(--header-h) + 88px);
   }
 
   nav{
