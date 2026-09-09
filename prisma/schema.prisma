@@ -1,5 +1,5 @@
-// Prisma 7: no `url` here. The connection string is supplied by the driver
-// adapter configured in prisma.config.ts.
+// Prisma 7: no `url` here. The connection string comes from the driver adapter
+// configured in prisma.config.ts.
 
 generator client {
   provider = "prisma-client"
@@ -11,8 +11,10 @@ datasource db {
 }
 
 enum LeadKind {
+  /// Someone used a contact form. No slot, no meeting.
   ENQUIRY
-  CONSULTATION
+  /// Someone booked a call. Has exactly one Booking.
+  CALL
 }
 
 enum LeadStatus {
@@ -24,20 +26,20 @@ enum LeadStatus {
 }
 
 enum SlotStatus {
+  /// Published by an admin and open for booking.
   AVAILABLE
-  /// Reserved by a PENDING booking, but only until that booking's holdExpiresAt.
-  /// An abandoned checkout must not make a slot permanently unsellable.
-  HELD
   BOOKED
+  /// Published but deliberately closed — holiday, admin is away.
   BLOCKED
 }
 
 enum BookingStatus {
-  PENDING
-  PAID
-  FAILED
+  /// Calls are free, so a booking is confirmed the moment it is made. There is
+  /// no pending state because there is no payment to wait for.
+  CONFIRMED
   CANCELLED
-  REFUNDED
+  COMPLETED
+  NO_SHOW
 }
 
 model Admin {
@@ -48,48 +50,30 @@ model Admin {
   createdAt    DateTime @default(now())
 }
 
-/// Catalogue of paid consultation types. `pricePaise` is the ONLY authority on
-/// price; the marketing page and the checkout API both read it through
-/// src/lib/pricing.ts. Never accept a price from a request body.
-model ConsultationType {
-  id           String    @id @default(cuid())
-  slug         String    @unique
-  name         String
-  summary      String
-  durationMins Int
-  pricePaise   Int
-  active       Boolean   @default(true)
-  sortOrder    Int       @default(0)
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-  slots        Slot[]
-  bookings     Booking[]
-}
-
-/// A bookable time slot. This is the row locked FOR UPDATE during checkout —
-/// the consultancy equivalent of a capacity check. The constraint is binary
-/// ("this slot is taken"), not a remaining count.
+/// A bookable session. Admins create these from /admin/sessions; a visitor picks
+/// a date and sees that date's AVAILABLE sessions.
+///
+/// This is the whole product now — there is no catalogue of paid consultation
+/// types, no price and no duration to choose. A session IS a start and an end.
 model Slot {
-  id                 String            @id @default(cuid())
-  startsAt           DateTime
-  endsAt             DateTime
-  status             SlotStatus        @default(AVAILABLE)
-  consultationTypeId String?
-  consultationType   ConsultationType? @relation(fields: [consultationTypeId], references: [id], onDelete: SetNull)
-  /// Many bookings may reference a slot over time (a failed attempt, then a
-  /// retry). At most ONE may be PAID — enforced by a partial unique index in
-  /// the migration, because a Razorpay order stays payable after a failure and
-  /// deleting the earlier booking would orphan a late capture.
-  bookings           Booking[]
-  createdAt          DateTime          @default(now())
-  updatedAt          DateTime          @updatedAt
+  id       String     @id @default(cuid())
+  startsAt DateTime
+  endsAt   DateTime
+  status   SlotStatus @default(AVAILABLE)
 
-  @@unique([startsAt, consultationTypeId])
+  /// Optional label shown to the visitor, e.g. "Intro call". Purely cosmetic.
+  label String?
+
+  bookings  Booking[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  /// One session per start time. Stops an admin double-publishing the same slot.
+  @@unique([startsAt])
   @@index([status, startsAt])
 }
 
-/// Unified admin list for BOTH funnels. `kind` tags which one.
-/// ENQUIRY rows have no booking; CONSULTATION rows have exactly one.
+/// Everyone who reached out, from either funnel. This is the admin's list.
 model Lead {
   id        String     @id @default(cuid())
   kind      LeadKind
@@ -110,77 +94,31 @@ model Lead {
   @@index([email])
 }
 
-/// All amounts are INTEGER PAISE. Never a float anywhere near a payment.
-/// Invariant enforced by src/lib/tax.ts: taxablePaise + taxTotalPaise == totalPaise
+/// A booked call. No money anywhere in this model.
 model Booking {
-  id                 String           @id @default(cuid())
-  leadId             String           @unique
-  lead               Lead             @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  slotId             String
-  slot               Slot             @relation(fields: [slotId], references: [id])
-  consultationTypeId String
-  consultationType   ConsultationType @relation(fields: [consultationTypeId], references: [id])
+  id     String        @id @default(cuid())
+  leadId String        @unique
+  lead   Lead          @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  slotId String
+  slot   Slot          @relation(fields: [slotId], references: [id])
+  status BookingStatus @default(CONFIRMED)
 
-  status BookingStatus @default(PENDING)
+  /// Google Calendar event carrying the Meet conference. Claimed once via
+  /// UPDATE ... WHERE "googleEventId" IS NULL so a retry cannot create two.
+  googleEventId String?
+  meetingUrl    String?
 
-  // ---- money (paise) ----
-  totalPaise   Int
-  taxablePaise Int
-  cgstPaise    Int @default(0)
-  sgstPaise    Int @default(0)
-  igstPaise    Int @default(0)
-  gstRatePercent Int
-  sacCode        String
-
-  // ---- place of supply (IGST Act s.12(2)) ----
-  placeOfSupplyStateCode String
-  clientStateCode        String?
-  clientGstin            String?
-  isInterState           Boolean
-
-  // ---- gateway ----
-  razorpayOrderId   String  @unique
-  razorpayPaymentId String? @unique
-  razorpaySignature String?
-
-  // ---- idempotency claims: each set exactly once via UPDATE ... WHERE <col> IS NULL ----
-  paidAt                  DateTime?
-  invoiceNumber           String?   @unique
-  invoiceFy               String?
+  /// Each claimed exactly once with UPDATE ... WHERE <col> IS NULL.
   confirmationEmailSentAt DateTime?
   reminderEmailSentAt     DateTime?
   ownerAlertSentAt        DateTime?
 
-  /// A PENDING booking holds its slot only until this instant. Past it, another
-  /// checkout may reclaim the slot. Cleared once the booking is PAID.
-  holdExpiresAt DateTime?
-
-  /// Set when a payment was captured for a slot that another PAID booking had
-  /// already taken. The money is real, so the booking is still PAID — but it is
-  /// flagged for a human to reschedule rather than silently double-booked.
-  slotConflict Boolean @default(false)
-
-  /// Google Calendar event that carries the Meet conference. Claimed once via
-  /// UPDATE ... WHERE "googleEventId" IS NULL so the webhook and the browser
-  /// callback cannot create two events for one booking.
-  googleEventId String?
-  meetingUrl      String?
   rescheduleCount Int      @default(0)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   @@index([status, createdAt])
   @@index([slotId])
-}
-
-/// Webhook de-duplication. Razorpay retries; the browser callback races it.
-model WebhookEvent {
-  id          String    @id @default(cuid())
-  eventId     String    @unique
-  event       String
-  payload     Json
-  receivedAt  DateTime  @default(now())
-  processedAt DateTime?
 }
 
 model Setting {

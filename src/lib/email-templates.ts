@@ -6,68 +6,44 @@
  * hand-written plain-text alternative for every message (not stripped HTML).
  *
  * Every user-facing string lives in `emailCopy` below; the render functions
- * contain markup only. All money is integer paise formatted through formatINR.
+ * contain markup only. Booking a call is FREE, so nothing in this file names a
+ * price, a tax head, an invoice or a payment — there is no money in the model.
  * All dates are formatted explicitly for Asia/Kolkata — the server's local zone
  * is never trusted.
  */
 
 import { siteConfig } from '@/config/site'
-import { formatINR, type Paise } from '@/lib/money'
 
 export type EmailContent = { subject: string; html: string; text: string }
-
-/**
- * Mirrors the money + place-of-supply columns on the Booking row.
- *
- * `gstRatePercent` is load-bearing beyond display: a rate of 0 means NO tax was
- * charged on this booking (the supplier was not GST-registered when it was
- * billed), and a supplier who is not registered must never send a document that
- * names a tax head, states a rate or quotes a SAC. `bookingConfirmation` reads
- * that flag off this summary — i.e. off what was actually charged and stored —
- * and not off siteConfig, so an email for an older booking keeps rendering the
- * way that booking was billed even after the registration status changes.
- */
-export type GstSummary = {
-  taxablePaise: Paise
-  cgstPaise: Paise
-  sgstPaise: Paise
-  igstPaise: Paise
-  totalPaise: Paise
-  /** Combined rate charged. 0 means the supply carried no tax at all. */
-  gstRatePercent: number
-  /** Optional — inferred from igstPaise when omitted. */
-  isInterState?: boolean
-}
 
 export type EnquiryAcknowledgementInput = { name: string }
 
 export type BookingConfirmationInput = {
   name: string
-  consultationName: string
   startsAt: Date
-  durationMins: number
+  /** Used only to print a duration. Omit it and the duration row is dropped. */
+  endsAt?: Date | null
+  /** The slot's cosmetic label, e.g. "Intro call". Falls back to a generic one. */
+  sessionLabel?: string | null
   meetingUrl?: string | null
-  invoiceNumber?: string | null
-  gst: GstSummary
 }
 
-export type ConsultationReminderInput = {
+export type CallReminderInput = {
   name: string
-  consultationName: string
   startsAt: Date
+  sessionLabel?: string | null
   meetingUrl?: string | null
 }
 
 export type OwnerAlertInput = {
-  kind: 'ENQUIRY' | 'CONSULTATION'
+  kind: 'ENQUIRY' | 'CALL'
   name: string
   email: string
   phone?: string | null
   company?: string | null
   message?: string | null
-  consultationName?: string | null
+  sessionLabel?: string | null
   startsAt?: Date | null
-  amount?: Paise | null
 }
 
 /** Internal notifications go to the single published contact address. */
@@ -117,60 +93,51 @@ export const emailCopy = {
     whatNext: [
       'We read your note and pull together anything relevant from our past work.',
       'You get a written reply with a straight answer and, where it helps, a suggested next step.',
-      'If it looks like a fit, we propose a short call — no deck, no pitch theatre.',
+      'If it looks like a fit, we book you a call — free, no deck, no pitch theatre.',
     ],
     reassurance:
       'Nothing is on autopilot here. One accountable team handles marketing and operations end to end, and the same team answers this inbox.',
   },
 
   booking: {
-    subject: (consultationName: string) => `Confirmed: ${consultationName} — ${siteConfig.name}`,
-    preheader: 'Payment received, slot locked in. Meeting link and invoice details inside.',
-    heading: 'Your consultation is confirmed',
+    subject: (sessionLabel: string) => `Confirmed: ${sessionLabel} — ${siteConfig.name}`,
+    preheader: 'Your call is booked. Time and joining link inside.',
+    heading: 'Your call is booked',
     intro:
-      'Payment has gone through and your slot is locked in. Everything you need for the call is below.',
-    detailsTitle: 'Your booking',
+      'Your session is locked in and the time is now blocked out on our side. Everything you need to join is below.',
+    /** Said plainly, because the old version of this email asked for money. */
+    free: 'There is nothing to pay. The call is free — we only ask that you turn up or tell us if you cannot.',
+    detailsTitle: 'Your call',
     labels: {
-      consultation: 'Consultation',
+      session: 'Session',
       when: 'When',
       duration: 'Duration',
       meetingLink: 'Meeting link',
-      invoiceNumber: 'Invoice number',
     },
+    sessionFallback: 'Intro call',
     joinLabel: 'Join the call',
     meetingPending:
       'The meeting link is being generated and will land in your inbox shortly, well before the call.',
     durationValue: (mins: number) => `${mins} minutes`,
-    paymentTitle: 'Payment summary',
-    payment: {
-      taxable: 'Taxable value',
-      cgst: (rate: string) => `CGST @ ${rate}%`,
-      sgst: (rate: string) => `SGST @ ${rate}%`,
-      igst: (rate: string) => `IGST @ ${rate}%`,
-      total: 'Total paid',
-      sac: (code: string) => `SAC ${code}`,
-      gstin: (gstin: string) => `GSTIN ${gstin}`,
-      inclusive: 'Advertised prices include GST; tax is back-computed from the total.',
-    },
-    rescheduleTitle: 'Reschedule policy',
+    rescheduleTitle: 'Need a different time?',
     /**
      * Derived from siteConfig.reschedule so the numbers can never drift from
      * the values the booking API enforces.
      */
     reschedule: [
-      `Need a different time? You can reschedule free of charge up to ${siteConfig.reschedule.minNoticeHours} hours before the call starts.`,
-      `Each booking can be rescheduled up to ${siteConfig.reschedule.maxReschedules} times. Consultations are reschedulable rather than refundable, so please move the slot instead of letting it lapse.`,
-      `To reschedule, reply to this email with the invoice number and two times that suit you.`,
+      `You can move this call up to ${siteConfig.reschedule.maxReschedules} times, as long as you give us at least ${siteConfig.reschedule.minNoticeHours} hours' notice before the start time.`,
+      'To move or cancel it, just reply to this email with the times that suit you. Inside the notice window the slot stays yours — tell us anyway and we will work something out.',
     ],
     prep: 'Come with the messy version of the problem. We would rather see the real constraints than a tidy summary.',
   },
 
   reminder: {
-    subject: (consultationName: string) => `Reminder: your ${consultationName} is coming up`,
-    preheader: 'Your consultation is coming up. Meeting link inside.',
-    heading: 'Your consultation is coming up',
+    subject: (sessionLabel: string) => `Reminder: your ${sessionLabel} is coming up`,
+    preheader: 'Your call is coming up. Meeting link inside.',
+    heading: 'Your call is coming up',
     intro: 'A quick reminder so the call does not sneak up on you. Here are the details again.',
-    labels: { consultation: 'Consultation', when: 'When', meetingLink: 'Meeting link' },
+    labels: { session: 'Session', when: 'When', meetingLink: 'Meeting link' },
+    sessionFallback: 'Intro call',
     joinLabel: 'Join the call',
     meetingPending:
       'We will send the meeting link separately before the call — keep an eye on this inbox.',
@@ -184,19 +151,19 @@ export const emailCopy = {
   owner: {
     subjects: {
       ENQUIRY: (name: string) => `[${siteConfig.name}] New enquiry — ${name}`,
-      CONSULTATION: (name: string) => `[${siteConfig.name}] New paid booking — ${name}`,
+      CALL: (name: string) => `[${siteConfig.name}] New call booked — ${name}`,
     },
     preheaders: {
       ENQUIRY: 'A new enquiry just came in through the website.',
-      CONSULTATION: 'A consultation was just booked and paid for.',
+      CALL: 'Someone just booked a call through the website.',
     },
     headings: {
       ENQUIRY: 'New enquiry',
-      CONSULTATION: 'New paid booking',
+      CALL: 'New call booked',
     },
     intros: {
       ENQUIRY: 'Someone submitted the enquiry form. Details below.',
-      CONSULTATION: 'A consultation has been booked and payment has been captured. Details below.',
+      CALL: 'Someone booked a call and the session is now taken. Details below.',
     },
     labels: {
       name: 'Name',
@@ -204,9 +171,8 @@ export const emailCopy = {
       phone: 'Phone',
       company: 'Company',
       message: 'Message',
-      consultation: 'Consultation',
+      session: 'Session',
       when: 'When',
-      amount: 'Amount paid',
     },
     footer: 'Internal notification — sent to the team, not to the client.',
   },
@@ -268,9 +234,16 @@ function formatIstDateTime(value: Date | null | undefined): string {
   return `${formatted} ${emailCopy.common.timeZoneLabel}`
 }
 
-function formatRate(rate: number): string {
-  if (!Number.isFinite(rate)) return '0'
-  return Number.isInteger(rate) ? String(rate) : rate.toFixed(1)
+/**
+ * Whole minutes between two instants, or null when the pair is unusable.
+ *
+ * The Slot row carries both ends, so the duration is derived rather than
+ * stored — there is no catalogue of fixed-length session types any more.
+ */
+function durationMinutes(startsAt: Date | null | undefined, endsAt: Date | null | undefined) {
+  if (!isValidDate(startsAt) || !isValidDate(endsAt)) return null
+  const mins = Math.round((endsAt.getTime() - startsAt.getTime()) / 60000)
+  return mins > 0 ? mins : null
 }
 
 function greetingFor(name: string | null | undefined): string {
@@ -281,7 +254,6 @@ function greetingFor(name: string | null | undefined): string {
 /* ---------------------------------------------------------- html pieces -- */
 
 type DetailRow = { label: string; valueHtml: string }
-type MoneyRow = { label: string; value: string; emphasis?: boolean }
 
 function paragraph(html: string, options: { muted?: boolean } = {}): string {
   const color = options.muted ? palette.muted : palette.body
@@ -313,29 +285,6 @@ function detailRows(rows: readonly DetailRow[]): string {
     )
     .join('')
   return `<div style="margin:0 0 8px 0;border:1px solid ${palette.hairline};border-radius:10px;padding:4px 16px;background:${palette.subtle};">${body}</div>`
-}
-
-function moneyRows(rows: readonly MoneyRow[]): string {
-  const body = rows
-    .map((row, index) => {
-      const labelColor = row.emphasis ? palette.ink : palette.muted
-      const valueColor = row.emphasis ? palette.accent : palette.ink
-      const size = row.emphasis ? '17px' : '14px'
-      // The rule above the total separates it from the rows it sums. With no
-      // rows above it — an untaxed booking prints the total alone — there is
-      // nothing to separate, and the rule would read as a stray line.
-      const border =
-        row.emphasis && index > 0
-          ? `border-top:1px solid ${palette.hairline};margin-top:6px;`
-          : ''
-      return `<div style="overflow:hidden;padding:8px 0;${border}">
-            <span style="float:left;font-size:${size};line-height:1.5;color:${labelColor};font-weight:${row.emphasis ? 700 : 400};">${escapeHtml(row.label)}</span>
-            <span style="float:right;font-size:${size};line-height:1.5;color:${valueColor};font-weight:700;">${escapeHtml(row.value)}</span>
-          </div>
-          <div style="clear:both;font-size:0;line-height:0;">&nbsp;</div>`
-    })
-    .join('')
-  return `<div style="margin:0 0 8px 0;border:1px solid ${palette.hairline};border-radius:10px;padding:6px 16px 10px 16px;background:${palette.subtle};">${body}</div>`
 }
 
 function button(url: string, label: string): string {
@@ -440,74 +389,38 @@ export function enquiryAcknowledgement(input: EnquiryAcknowledgementInput): Emai
 
 /* ------------------------------------------- funnel 2: booking confirmed -- */
 
+/**
+ * The confirmation that goes to the client: who the call is with, when it is in
+ * IST with the zone named, the meeting link, and how to move it.
+ *
+ * There is deliberately nothing else. This message used to carry a GST
+ * breakdown and an invoice number; calls are free now, so a money section here
+ * would be an invoice for nothing.
+ */
 export function bookingConfirmation(input: BookingConfirmationInput): EmailContent {
   const copy = emailCopy.booking
   const greeting = greetingFor(input.name)
-  const consultationName = cleanText(input.consultationName) ?? siteConfig.name
+  const sessionLabel = cleanText(input.sessionLabel) ?? copy.sessionFallback
   const when = formatIstDateTime(input.startsAt)
-  const duration = copy.durationValue(input.durationMins)
+  const mins = durationMinutes(input.startsAt, input.endsAt)
+  const duration = mins === null ? null : copy.durationValue(mins)
   const meetingUrl = safeUrl(input.meetingUrl)
-  const invoiceNumber = cleanText(input.invoiceNumber)
-
-  const { gst } = input
-  // No tax on this booking -> print the total and nothing else. See GstSummary:
-  // the flag comes from the stored breakdown, never from siteConfig.
-  const taxCharged = gst.gstRatePercent !== 0
-  const interState = gst.isInterState ?? gst.igstPaise > 0
-  const fullRate = formatRate(gst.gstRatePercent)
-  const halfRate = formatRate(gst.gstRatePercent / 2)
-
-  const totalRow: MoneyRow = {
-    label: copy.payment.total,
-    value: formatINR(gst.totalPaise),
-    emphasis: true,
-  }
-
-  const money: MoneyRow[] = taxCharged
-    ? [
-        { label: copy.payment.taxable, value: formatINR(gst.taxablePaise) },
-        ...(interState
-          ? [{ label: copy.payment.igst(fullRate), value: formatINR(gst.igstPaise) }]
-          : [
-              { label: copy.payment.cgst(halfRate), value: formatINR(gst.cgstPaise) },
-              { label: copy.payment.sgst(halfRate), value: formatINR(gst.sgstPaise) },
-            ]),
-        totalRow,
-      ]
-    : [totalRow]
 
   const details: DetailRow[] = [
-    { label: copy.labels.consultation, valueHtml: escapeHtml(consultationName) },
+    { label: copy.labels.session, valueHtml: escapeHtml(sessionLabel) },
     { label: copy.labels.when, valueHtml: escapeHtml(when) },
-    { label: copy.labels.duration, valueHtml: escapeHtml(duration) },
-    ...(invoiceNumber
-      ? [{ label: copy.labels.invoiceNumber, valueHtml: escapeHtml(invoiceNumber) }]
-      : []),
+    ...(duration ? [{ label: copy.labels.duration, valueHtml: escapeHtml(duration) }] : []),
   ]
-
-  // SAC, GSTIN and the "prices include GST" line are all assertions of a live
-  // registration. An untaxed booking gets none of them.
-  const taxNotes: string[] = taxCharged
-    ? [
-        copy.payment.sac(siteConfig.tax.sacCode),
-        ...(siteConfig.tax.supplierGstin ? [copy.payment.gstin(siteConfig.tax.supplierGstin)] : []),
-        ...(siteConfig.tax.pricesIncludeTax ? [copy.payment.inclusive] : []),
-      ]
-    : []
 
   const bodyHtml = [
     paragraph(escapeHtml(greeting)),
     paragraph(escapeHtml(copy.intro)),
+    paragraph(escapeHtml(copy.free)),
     sectionTitle(copy.detailsTitle),
     detailRows(details),
     meetingUrl
       ? button(meetingUrl, copy.joinLabel)
       : paragraph(escapeHtml(copy.meetingPending), { muted: true }),
-    sectionTitle(copy.paymentTitle),
-    moneyRows(money),
-    taxNotes.length > 0
-      ? paragraph(taxNotes.map((note) => escapeHtml(note)).join(' &middot; '), { muted: true })
-      : '',
     sectionTitle(copy.rescheduleTitle),
     copy.reschedule.map((line) => paragraph(escapeHtml(line))).join(''),
     paragraph(escapeHtml(copy.prep)),
@@ -520,18 +433,15 @@ export function bookingConfirmation(input: BookingConfirmationInput): EmailConte
     '',
     copy.intro,
     '',
+    copy.free,
+    '',
     copy.detailsTitle.toUpperCase(),
-    textLabelled(copy.labels.consultation, consultationName, 14),
+    textLabelled(copy.labels.session, sessionLabel, 14),
     textLabelled(copy.labels.when, when, 14),
-    textLabelled(copy.labels.duration, duration, 14),
-    ...(invoiceNumber ? [textLabelled(copy.labels.invoiceNumber, invoiceNumber, 14)] : []),
+    ...(duration ? [textLabelled(copy.labels.duration, duration, 14)] : []),
     meetingUrl
       ? textLabelled(copy.labels.meetingLink, meetingUrl, 14)
       : `  ${copy.meetingPending}`,
-    '',
-    copy.paymentTitle.toUpperCase(),
-    ...money.map((row) => textLabelled(row.label, row.value, 20)),
-    ...(taxNotes.length > 0 ? [`  ${taxNotes.join(' · ')}`] : []),
     '',
     copy.rescheduleTitle.toUpperCase(),
     ...copy.reschedule.map((line) => `  ${line}`),
@@ -543,7 +453,7 @@ export function bookingConfirmation(input: BookingConfirmationInput): EmailConte
   ])
 
   return {
-    subject: copy.subject(consultationName),
+    subject: copy.subject(sessionLabel),
     html: layout({ preheader: copy.preheader, heading: copy.heading, bodyHtml }),
     text,
   }
@@ -551,15 +461,15 @@ export function bookingConfirmation(input: BookingConfirmationInput): EmailConte
 
 /* ------------------------------------------------------------- reminder -- */
 
-export function consultationReminder(input: ConsultationReminderInput): EmailContent {
+export function callReminder(input: CallReminderInput): EmailContent {
   const copy = emailCopy.reminder
   const greeting = greetingFor(input.name)
-  const consultationName = cleanText(input.consultationName) ?? siteConfig.name
+  const sessionLabel = cleanText(input.sessionLabel) ?? copy.sessionFallback
   const when = formatIstDateTime(input.startsAt)
   const meetingUrl = safeUrl(input.meetingUrl)
 
   const details: DetailRow[] = [
-    { label: copy.labels.consultation, valueHtml: escapeHtml(consultationName) },
+    { label: copy.labels.session, valueHtml: escapeHtml(sessionLabel) },
     { label: copy.labels.when, valueHtml: escapeHtml(when) },
   ]
 
@@ -580,7 +490,7 @@ export function consultationReminder(input: ConsultationReminderInput): EmailCon
     '',
     copy.intro,
     '',
-    textLabelled(copy.labels.consultation, consultationName, 14),
+    textLabelled(copy.labels.session, sessionLabel, 14),
     textLabelled(copy.labels.when, when, 14),
     meetingUrl
       ? textLabelled(copy.labels.meetingLink, meetingUrl, 14)
@@ -593,7 +503,7 @@ export function consultationReminder(input: ConsultationReminderInput): EmailCon
   ])
 
   return {
-    subject: copy.subject(consultationName),
+    subject: copy.subject(sessionLabel),
     html: layout({ preheader: copy.preheader, heading: copy.heading, bodyHtml }),
     text,
   }
@@ -603,18 +513,14 @@ export function consultationReminder(input: ConsultationReminderInput): EmailCon
 
 export function ownerAlert(input: OwnerAlertInput): EmailContent {
   const copy = emailCopy.owner
-  const kind: 'ENQUIRY' | 'CONSULTATION' = input.kind === 'CONSULTATION' ? 'CONSULTATION' : 'ENQUIRY'
+  const kind: 'ENQUIRY' | 'CALL' = input.kind === 'CALL' ? 'CALL' : 'ENQUIRY'
   const name = cleanText(input.name) ?? emailCopy.common.notProvided
   const email = cleanText(input.email)
   const phone = cleanText(input.phone)
   const company = cleanText(input.company)
   const message = cleanText(input.message)
-  const consultationName = cleanText(input.consultationName)
+  const sessionLabel = cleanText(input.sessionLabel)
   const when = isValidDate(input.startsAt) ? formatIstDateTime(input.startsAt) : null
-  const amount =
-    typeof input.amount === 'number' && Number.isFinite(input.amount) && input.amount >= 0
-      ? formatINR(input.amount)
-      : null
 
   const rows: DetailRow[] = [
     { label: copy.labels.name, valueHtml: escapeHtml(name) },
@@ -626,11 +532,10 @@ export function ownerAlert(input: OwnerAlertInput): EmailContent {
     },
     ...(phone ? [{ label: copy.labels.phone, valueHtml: escapeHtml(phone) }] : []),
     ...(company ? [{ label: copy.labels.company, valueHtml: escapeHtml(company) }] : []),
-    ...(consultationName
-      ? [{ label: copy.labels.consultation, valueHtml: escapeHtml(consultationName) }]
+    ...(sessionLabel
+      ? [{ label: copy.labels.session, valueHtml: escapeHtml(sessionLabel) }]
       : []),
     ...(when ? [{ label: copy.labels.when, valueHtml: escapeHtml(when) }] : []),
-    ...(amount ? [{ label: copy.labels.amount, valueHtml: escapeHtml(amount) }] : []),
     ...(message ? [{ label: copy.labels.message, valueHtml: escapeMultiline(message) }] : []),
   ]
 
@@ -643,9 +548,8 @@ export function ownerAlert(input: OwnerAlertInput): EmailContent {
     textLabelled(copy.labels.email, email ?? emailCopy.common.notProvided, 16),
     ...(phone ? [textLabelled(copy.labels.phone, phone, 16)] : []),
     ...(company ? [textLabelled(copy.labels.company, company, 16)] : []),
-    ...(consultationName ? [textLabelled(copy.labels.consultation, consultationName, 16)] : []),
+    ...(sessionLabel ? [textLabelled(copy.labels.session, sessionLabel, 16)] : []),
     ...(when ? [textLabelled(copy.labels.when, when, 16)] : []),
-    ...(amount ? [textLabelled(copy.labels.amount, amount, 16)] : []),
     ...(message ? ['', copy.labels.message.toUpperCase(), message] : []),
     '',
     emailCopy.common.textDivider,

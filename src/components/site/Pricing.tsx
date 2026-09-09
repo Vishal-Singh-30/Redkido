@@ -3,9 +3,9 @@ import { Reveal } from '@/components/motion/reveal'
 import { pricing, type PricingTier } from '@/content/pricing'
 
 /**
- * Retainer engagements — scoped monthly, no fixed amount. These are NOT the paid
- * consultation products: every CTA is an in-page anchor and nothing here touches
- * checkout or a price in paise.
+ * Retainer engagements — scoped monthly, no fixed amount. Nothing on this site
+ * is transacted: every CTA here is an in-page anchor to the contact form, and
+ * booking a call is free.
  */
 function buttonClass(variant: string): string {
   return variant === 'ghost' ? 'btn btn-ghost' : 'btn'

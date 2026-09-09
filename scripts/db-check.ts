@@ -2,9 +2,7 @@ import '../prisma/env'
 import { PrismaPg } from '@prisma/adapter-pg'
 import { PrismaClient } from '../src/generated/prisma/client'
 
-// NOTE: package.json has no "type":"module", so tsx transpiles these scripts to
-// CJS, where TOP-LEVEL AWAIT IS A HARD ERROR. Every tsx-run script in this repo
-// (including prisma/seed.ts) must wrap its awaits in an async main().
+// tsx compiles to CJS here, so no top-level await.
 async function main() {
   const adapter = new PrismaPg({
     connectionString: process.env.DATABASE_URL,
@@ -17,14 +15,11 @@ async function main() {
   console.log('tables:', tables.map((r) => r.table_name).join(', '))
   console.log(
     'admins:', await prisma.admin.count(),
-    '| consultationTypes:', await prisma.consultationType.count(),
     '| slots:', await prisma.slot.count(),
-    '| leads:', await prisma.lead.count()
+    '| leads:', await prisma.lead.count(),
+    '| bookings:', await prisma.booking.count(),
   )
   await prisma.$disconnect()
 }
 
-main().catch((e) => {
-  console.error(e)
-  process.exit(1)
-})
+main().catch((e) => { console.error(e); process.exit(1) })

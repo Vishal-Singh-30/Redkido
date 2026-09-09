@@ -2,26 +2,28 @@
  * Hand-built SVG charts. Server components — no charting library, no client
  * JavaScript, no dependency of any kind.
  *
- * Rules that hold for every chart here:
- *   - Money arrives as INTEGER PAISE and is rendered with formatINR. No float
- *     ever touches an amount; the only division is geometry (pixels), never money.
+ * Every value here is a COUNT. There is no money on this site any more, so the
+ * old `format: 'money'` branch and its formatINR import are gone rather than
+ * left switched off — a formatter for a currency nothing produces is a trap for
+ * whoever reads this next.
+ *
+ * Rules that hold for every chart:
  *   - Empty input renders an explicit "no data" state. A chart must never emit
  *     a path containing NaN, which is what a naive value/max does on an empty
  *     or all-zero dataset.
  *   - Every chart is role="img" with a <title>, and is followed by a
  *     visually-hidden table carrying the same numbers, so the figures are
  *     reachable by a screen reader and by copy-paste.
- *   - All copy comes from adminCopy. No literal strings below.
+ *   - All copy comes from adminCopy. No literal a human reads appears below.
  */
 
 import type { ReactNode } from 'react'
-import { formatINR, type Paise } from '@/lib/money'
 import { adminCopy } from '@/components/admin/shell'
 
 export type ChartPoint = {
   /** Axis / row label, already formatted for display. */
   label: string
-  /** Paise when format is 'money', a plain count otherwise. */
+  /** A plain count. Never a currency amount — there are none. */
   value: number
 }
 
@@ -32,8 +34,6 @@ export type ChartSeries = {
   tone?: 'primary' | 'secondary'
 }
 
-export type ValueFormat = 'count' | 'money'
-
 const VIEW_WIDTH = 720
 
 const TONE_STROKE: Record<'primary' | 'secondary', string> = {
@@ -43,11 +43,7 @@ const TONE_STROKE: Record<'primary' | 'secondary', string> = {
 
 const countFormatter = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 })
 
-function formatValue(value: number, format: ValueFormat): string {
-  if (format === 'money') {
-    const paise: Paise = Math.round(value)
-    return formatINR(paise)
-  }
+function formatValue(value: number): string {
   return countFormatter.format(value)
 }
 
@@ -86,7 +82,7 @@ export function StatTile({
   accent = false,
 }: {
   label: string
-  /** Already formatted for display (formatINR for money). */
+  /** Already formatted for display. */
   value: string
   sub?: string
   accent?: boolean
@@ -118,12 +114,10 @@ export function LineChart({
   series,
   height = 220,
   label,
-  format = 'count',
 }: {
   series: ChartSeries[]
   height?: number
   label: string
-  format?: ValueFormat
 }) {
   const populated = series.filter((s) => s.points.length > 0)
   if (populated.length === 0) {
@@ -142,7 +136,7 @@ export function LineChart({
   const padTop = 16
   const padRight = 16
   const padBottom = 30
-  const padLeft = 56
+  const padLeft = 44
   const innerWidth = VIEW_WIDTH - padLeft - padRight
   const innerHeight = height - padTop - padBottom
 
@@ -192,7 +186,7 @@ export function LineChart({
                 fontSize={11}
                 fill="var(--color-muted-2)"
               >
-                {formatValue(Math.round(max * tick), format)}
+                {formatValue(Math.round(max * tick))}
               </text>
             </g>
           )
@@ -267,7 +261,7 @@ export function LineChart({
             <tr key={point.label}>
               <th scope="row">{point.label}</th>
               {populated.map((s) => (
-                <td key={s.name}>{formatValue(s.points[index]?.value ?? 0, format)}</td>
+                <td key={s.name}>{formatValue(s.points[index]?.value ?? 0)}</td>
               ))}
             </tr>
           ))}
@@ -285,12 +279,10 @@ export function BarChart({
   data,
   height = 220,
   label,
-  format = 'money',
 }: {
   data: ChartPoint[]
   height?: number
   label: string
-  format?: ValueFormat
 }) {
   if (data.length === 0) {
     return (
@@ -336,7 +328,7 @@ export function BarChart({
                 fontSize={12}
                 fill="var(--color-muted)"
               >
-                {formatValue(point.value, format)}
+                {formatValue(point.value)}
               </text>
               <rect
                 x={padX}
@@ -364,7 +356,7 @@ export function BarChart({
           {data.map((point) => (
             <tr key={point.label}>
               <th scope="row">{point.label}</th>
-              <td>{formatValue(point.value, format)}</td>
+              <td>{formatValue(point.value)}</td>
             </tr>
           ))}
         </tbody>

@@ -11,7 +11,6 @@ import { hash } from 'bcryptjs'
 
 import { prisma } from '@/lib/prisma'
 import { siteConfig } from '@/config/site'
-import { consultationCatalogue } from '@/content/consultations'
 import type { Prisma } from '@/generated/prisma/client'
 
 /**
@@ -91,52 +90,30 @@ async function seedAdmin(): Promise<string> {
   return admin.email
 }
 
-async function seedConsultationTypes(): Promise<number> {
-  // The catalogue in src/content/consultations.ts is the one source of truth
-  // for names and prices. Nothing is retyped here.
-  for (const consultation of consultationCatalogue) {
-    const data = {
-      name: consultation.name,
-      summary: consultation.summary,
-      durationMins: consultation.durationMins,
-      pricePaise: consultation.pricePaise,
-      active: true,
-      sortOrder: consultation.sortOrder,
-    }
 
-    await prisma.consultationType.upsert({
-      where: { slug: consultation.slug },
-      update: data,
-      create: { slug: consultation.slug, ...data },
-    })
-  }
+/** Every seeded session runs for this long. Admins can create any length later. */
+const SESSION_MINUTES = 30
 
-  return consultationCatalogue.length
-}
-
+/**
+ * Publishes a rolling window of bookable sessions.
+ *
+ * A session is now just a start and an end — there is no catalogue of types and
+ * nothing is priced, so this creates ONE session per time rather than one per
+ * type. Existing rows are left alone, which is what makes re-running the seed
+ * safe, and the unique index on startsAt is the backstop.
+ */
 async function seedSlots(): Promise<number> {
-  const types = await prisma.consultationType.findMany({
-    where: { active: true },
-    select: { id: true, durationMins: true },
-    orderBy: { sortOrder: 'asc' },
-  })
-
-  if (types.length === 0) return 0
-
   const now = new Date()
   const windowStart = new Date(istMidnightUtcMs(now, 0))
   const windowEnd = new Date(istMidnightUtcMs(now, SLOT_HORIZON_DAYS + 1))
 
   // One read, then a pure in-memory diff: cheaper and clearer than probing each
-  // candidate slot, and it makes the "skip what already exists" rule explicit.
+  // candidate, and it makes the "skip what already exists" rule explicit.
   const existing = await prisma.slot.findMany({
     where: { startsAt: { gte: windowStart, lt: windowEnd } },
-    select: { startsAt: true, consultationTypeId: true },
+    select: { startsAt: true },
   })
-
-  const seen = new Set(
-    existing.map((slot) => `${slot.startsAt.toISOString()}|${slot.consultationTypeId ?? ''}`),
-  )
+  const seen = new Set(existing.map((slot) => slot.startsAt.toISOString()))
 
   const rows: Prisma.SlotCreateManyInput[] = []
 
@@ -149,18 +126,15 @@ async function seedSlots(): Promise<number> {
       // Never publish availability that is already in the past today.
       if (startsAt.getTime() <= now.getTime()) continue
 
-      for (const type of types) {
-        const key = `${startsAt.toISOString()}|${type.id}`
-        if (seen.has(key)) continue
-        seen.add(key)
+      const key = startsAt.toISOString()
+      if (seen.has(key)) continue
+      seen.add(key)
 
-        rows.push({
-          startsAt,
-          endsAt: new Date(startsAt.getTime() + type.durationMins * MS_PER_MINUTE),
-          status: 'AVAILABLE',
-          consultationTypeId: type.id,
-        })
-      }
+      rows.push({
+        startsAt,
+        endsAt: new Date(startsAt.getTime() + SESSION_MINUTES * MS_PER_MINUTE),
+        status: 'AVAILABLE',
+      })
     }
   }
 
@@ -172,13 +146,12 @@ async function seedSlots(): Promise<number> {
 
 async function main(): Promise<void> {
   const adminEmail = await seedAdmin()
-  const typeCount = await seedConsultationTypes()
   const slotCount = await seedSlots()
 
   console.log('Seed complete:')
-  console.log(`  admin              : ${adminEmail}`)
-  console.log(`  consultation types : ${typeCount} upserted`)
-  console.log(`  slots              : ${slotCount} created (weekdays, 11:00/14:00/16:00 IST, next ${SLOT_HORIZON_DAYS} days)`)
+  console.log(`  admin    : ${adminEmail}`)
+  console.log(`  sessions : ${slotCount} created (weekdays, 11:00/14:00/16:00 IST, next ${SLOT_HORIZON_DAYS} days)`)
+  console.log('  Add, block or remove sessions from /admin/sessions.')
 }
 
 main()

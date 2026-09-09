@@ -1,25 +1,22 @@
 /**
- * Post-payment fulfilment: invoice number, confirmation email, owner alert.
+ * Post-booking fulfilment: meeting link, confirmation email, owner alert.
  *
  * ── WHY THIS IS SHAPED THE WAY IT IS ────────────────────────────────────────
  *
- * Two callers run this, and they WILL race:
- *
- *   - the Razorpay webhook (src/app/api/razorpay/webhook), and
- *   - the browser callback (src/app/api/checkout/verify),
- *
- * often within the same second, sometimes on two different lambdas, and either
- * one can arrive first. Razorpay also retries a webhook it thinks failed, so
- * "exactly once" has to survive being called an arbitrary number of times.
+ * Calls are free, so there is no payment webhook racing the browser any more.
+ * The shape below survives that simplification anyway, because the callers
+ * still are not single: POST /api/book runs it, an admin can re-run it, and a
+ * retried request can arrive after the first one already started. "Exactly
+ * once" has to survive being called an arbitrary number of times.
  *
  * So there is no "has this been fulfilled?" flag, because a flag is read and
- * then acted on, and both racers read `false` before either writes `true`.
+ * then acted on, and two callers both read `false` before either writes `true`.
  * Instead EACH side effect is claimed separately with a conditional write:
  *
  *     UPDATE "Booking" SET <col> = now() WHERE id = $1 AND <col> IS NULL
  *
  * The database decides the winner. `count === 1` means this process owns that
- * one side effect and must perform it; `count === 0` means the other side
+ * one side effect and must perform it; `count === 0` means another caller
  * already has it, which is a completely normal outcome and not an error.
  *
  * Claiming BEFORE sending is deliberate: the opposite order (send, then record)
@@ -39,47 +36,48 @@
  *      confirmation again. sendEmail() now aborts a timed-out request AND
  *      reports `indeterminate`, and an indeterminate send NEVER releases the
  *      claim. Losing one email is a support ticket; two identical
- *      confirmations in a paying client's inbox cannot be taken back.
+ *      confirmations in a client's inbox cannot be taken back.
  *
  *   2. NOTHING RETRIES. "Released for retry" described a mechanism that does
- *      not exist — there is no queue, no cron, no scheduled re-run, and the
- *      other racer has usually already exited by the time the release lands.
- *      A released claim only helps a caller that happens to arrive later
- *      (a Razorpay webhook retry, or a human calling resendConfirmation()).
+ *      not exist — there is no queue, no cron, no scheduled re-run. A released
+ *      claim only helps a caller that happens to arrive later (a retried
+ *      request, or a human calling resendConfirmation()).
  *
  * So every unsent confirmation — withheld, failed, or unknown — is logged at
  * error level with the booking id and the marker CONFIRMATION_UNSENT, and the
  * owner alert still fires so a human learns the client was not written to.
- * `grep CONFIRMATION_UNSENT` is the operator's list of clients who paid and
+ * `grep CONFIRMATION_UNSENT` is the operator's list of clients who booked and
  * may be sitting in silence. See resendConfirmation() for the way back.
  *
  * ── AND IT NEVER THROWS ─────────────────────────────────────────────────────
  *
- * The payment has already happened by the time this runs. Nothing in here —
- * a Resend outage, a sequence error, a malformed row — may propagate into the
- * caller and turn a captured payment into a 500. Everything is caught and
- * logged; the markers below are what an operator alerts on. Each side effect
- * is guarded separately too, so a confirmation that blows up cannot take the
- * owner alert down with it.
+ * The slot has already been taken by the time this runs, and the client has
+ * already been told they are booked. Nothing in here — a Resend outage, a
+ * Google outage, a malformed row — may propagate into the caller and turn a
+ * real booking into a 500. Everything is caught and logged; the markers below
+ * are what an operator alerts on. Each side effect is guarded separately too,
+ * so a confirmation that blows up cannot take the owner alert down with it.
  */
 
 import { siteConfig } from '@/config/site'
 import { bookingConfirmation, ownerAlert, ownerAlertRecipient } from '@/lib/email-templates'
 import { sendEmail } from '@/lib/email'
-import { claimInvoiceNumber } from '@/lib/invoice'
 import { createMeetingEvent, isGoogleCalendarConfigured } from '@/lib/google-calendar'
 import { prisma } from '@/lib/prisma'
 import { SETTING_KEYS } from '@/components/admin/shell'
 
 const LOG = '[fulfilment]'
 
+/** Shown when a slot carries no cosmetic label of its own. */
+const DEFAULT_SESSION_LABEL = 'Intro call'
+
 /**
  * Sentinel written into googleEventId while the Calendar call is in flight.
  *
- * The claim has to be taken BEFORE the event id exists, otherwise the webhook
- * and the browser callback both call Google and the client is invited to two
- * meetings. Same shape as the email claims in this file: claim, act, and put
- * the claim back if the action failed so a retry can pick it up.
+ * The claim has to be taken BEFORE the event id exists, otherwise two callers
+ * both call Google and the client is invited to two meetings. Same shape as the
+ * email claims in this file: claim, act, and put the claim back if the action
+ * failed so a retry can pick it up.
  */
 const MEETING_CLAIM_IN_FLIGHT = '__creating__'
 
@@ -95,6 +93,11 @@ async function settingsMeetingLink(): Promise<string | null> {
   } catch {
     return null
   }
+}
+
+function sessionLabelFor(booking: FulfilmentBooking): string {
+  const label = booking.slot.label?.trim()
+  return label && label.length > 0 ? label : DEFAULT_SESSION_LABEL
 }
 
 /**
@@ -119,10 +122,12 @@ async function claimMeeting(booking: FulfilmentBooking): Promise<string | null> 
     return fresh?.meetingUrl ?? (await settingsMeetingLink())
   }
 
+  const label = sessionLabelFor(booking)
+
   const details = await createMeetingEvent({
-    summary: `${booking.consultationType.name} — ${siteConfig.name} × ${booking.lead.name}`,
+    summary: `${label} — ${siteConfig.name} × ${booking.lead.name}`,
     description: [
-      `${booking.consultationType.name} (${booking.consultationType.durationMins} min)`,
+      label,
       booking.lead.company ? `Company: ${booking.lead.company}` : null,
       booking.lead.message
         ? `\nWhat they want to cover:\n${booking.lead.message}`
@@ -138,7 +143,7 @@ async function claimMeeting(booking: FulfilmentBooking): Promise<string | null> 
   })
 
   if (details === null) {
-    // Release the claim so a webhook retry or an admin resend can try again.
+    // Release the claim so a retry or an admin resend can try again.
     await prisma.booking.updateMany({
       where: { id: booking.id, googleEventId: MEETING_CLAIM_IN_FLIGHT },
       data: { googleEventId: null },
@@ -160,8 +165,8 @@ async function claimMeeting(booking: FulfilmentBooking): Promise<string | null> 
  * Grep markers. One token per side effect, whatever the reason, so a single
  * search finds every affected booking:
  *
- *   grep CONFIRMATION_UNSENT  — a paying client was not (or may not have been)
- *                               written to; the reason= field says which.
+ *   grep CONFIRMATION_UNSENT  — a client was not (or may not have been) written
+ *                               to; the reason= field says which.
  *   grep OWNER_ALERT_UNSENT   — nobody internal was told about the booking.
  */
 export const CONFIRMATION_UNSENT_MARKER = 'CONFIRMATION_UNSENT'
@@ -170,16 +175,14 @@ export const OWNER_ALERT_UNSENT_MARKER = 'OWNER_ALERT_UNSENT'
 /**
  * Why a confirmation did not go out.
  *
- *   withheld             — caller asked for a hold; auto-confirming would lie.
- *   invoice-not-allotted — the serial could not be claimed, so the email would
- *                          have carried no invoice number.
- *   send-failed          — definitively not delivered. The claim was released,
- *                          so a later caller may try again.
- *   send-unknown         — timed out and was aborted; delivery is unknown. The
- *                          claim was KEPT, because releasing it is what sends a
- *                          second copy. Only a human clears this one.
+ *   withheld     — caller asked for a hold; auto-confirming would lie.
+ *   send-failed  — definitively not delivered. The claim was released, so a
+ *                  later caller may try again.
+ *   send-unknown — timed out and was aborted; delivery is unknown. The claim
+ *                  was KEPT, because releasing it is what sends a second copy.
+ *                  Only a human clears this one.
  */
-type UnsentReason = 'withheld' | 'invoice-not-allotted' | 'send-failed' | 'send-unknown'
+type UnsentReason = 'withheld' | 'send-failed' | 'send-unknown'
 
 /** What happened to a confirmation attempt. */
 export type ConfirmationStatus =
@@ -189,18 +192,17 @@ export type ConfirmationStatus =
   | 'failed'
   | 'unknown'
   | 'booking-not-found'
-  | 'not-paid'
+  | 'cancelled'
 
 export type ResendConfirmationResult = {
   readonly status: ConfirmationStatus
-  readonly invoiceNumber: string | null
 }
 
 /** Booking plus everything the templates need, in one round trip. */
 async function loadBooking(bookingId: string) {
   return prisma.booking.findUnique({
     where: { id: bookingId },
-    include: { lead: true, slot: true, consultationType: true },
+    include: { lead: true, slot: true },
   })
 }
 
@@ -229,53 +231,16 @@ function logConfirmationUnsent(bookingId: string, reason: UnsentReason, detail: 
 }
 
 /**
- * Claims the invoice number and returns it.
- *
- * claimInvoiceNumber() is idempotent and opens its OWN transaction, so it is
- * called here — outside any transaction of ours — exactly as its contract
- * requires. A failure is logged and fulfilment continues: the owner alert still
- * goes out, and the confirmation is held rather than sent without a number.
- */
-async function claimInvoice(bookingId: string): Promise<string | null> {
-  try {
-    const claim = await claimInvoiceNumber(bookingId)
-    return claim.invoiceNumber
-  } catch (error) {
-    console.error(`${LOG} booking=${bookingId} INVOICE CLAIM FAILED`, error)
-    return null
-  }
-}
-
-/**
- * The confirmation that goes to the client: what they booked, when, the GST
- * breakdown as charged, and the invoice number.
- *
- * The invoice number is a precondition, not a nicety. The confirmation claim is
- * one-shot, so sending a numberless confirmation spends the only chance the
- * client had of ever receiving a correct one — they would be left holding a
- * confirmation with no invoice reference and no way to be sent a better one.
- * If the serial could not be allotted the claim is left untouched, and the
- * message goes out once, complete, when someone re-runs this.
+ * The confirmation that goes to the client: what they booked, when it is in
+ * IST, and the link to join. No money, because the call is free.
  *
  * `force` drops the idempotency key so a human-ordered resend is not collapsed
  * onto the earlier attempt by Resend.
  */
 async function deliverConfirmation(
   booking: FulfilmentBooking,
-  invoiceNumber: string | null,
   opts: { readonly force?: boolean } = {},
 ): Promise<ConfirmationStatus> {
-  const effectiveInvoiceNumber = invoiceNumber ?? booking.invoiceNumber
-
-  if (effectiveInvoiceNumber === null) {
-    logConfirmationUnsent(
-      booking.id,
-      'invoice-not-allotted',
-      'no invoice serial; the confirmation claim was left unspent so it can go out once, with the number on it',
-    )
-    return 'withheld'
-  }
-
   const claim = await prisma.booking.updateMany({
     where: { id: booking.id, confirmationEmailSentAt: null },
     data: { confirmationEmailSentAt: new Date() },
@@ -288,20 +253,10 @@ async function deliverConfirmation(
 
   const content = bookingConfirmation({
     name: booking.lead.name,
-    consultationName: booking.consultationType.name,
+    sessionLabel: sessionLabelFor(booking),
     startsAt: booking.slot.startsAt,
-    durationMins: booking.consultationType.durationMins,
+    endsAt: booking.slot.endsAt,
     meetingUrl: booking.meetingUrl,
-    invoiceNumber: effectiveInvoiceNumber,
-    gst: {
-      taxablePaise: booking.taxablePaise,
-      cgstPaise: booking.cgstPaise,
-      sgstPaise: booking.sgstPaise,
-      igstPaise: booking.igstPaise,
-      totalPaise: booking.totalPaise,
-      gstRatePercent: booking.gstRatePercent,
-      isInterState: booking.isInterState,
-    },
   })
 
   const result = await sendEmail({
@@ -374,15 +329,14 @@ async function sendOwnerAlert(booking: FulfilmentBooking): Promise<void> {
   }
 
   const content = ownerAlert({
-    kind: 'CONSULTATION',
+    kind: 'CALL',
     name: booking.lead.name,
     email: booking.lead.email,
     phone: booking.lead.phone,
     company: booking.lead.company,
     message: booking.lead.message,
-    consultationName: booking.consultationType.name,
+    sessionLabel: sessionLabelFor(booking),
     startsAt: booking.slot.startsAt,
-    amount: booking.totalPaise,
   })
 
   const result = await sendEmail({
@@ -444,11 +398,11 @@ async function runStep(bookingId: string, step: string, run: () => Promise<void>
 }
 
 /**
- * Everything that must happen once a booking is paid.
+ * Everything that must happen once a call is booked.
  *
- * Idempotent and safe to call concurrently: call it from the webhook, from the
- * browser callback, from both at once, or from an admin retry. Each side effect
- * happens exactly once across all of those calls.
+ * Idempotent and safe to call concurrently: call it from the booking route,
+ * from an admin retry, or from both at once. Each side effect happens exactly
+ * once across all of those calls.
  *
  * Never throws.
  */
@@ -467,24 +421,14 @@ export async function fulfilBooking(
     }
 
     /**
-     * The guard that keeps an unpaid booking out of the client's inbox. Both
-     * callers claim the PAID transition before calling this, so an unpaid row
-     * here means something is wrong upstream and it is worth saying so loudly
-     * rather than confirming a consultation nobody paid for.
+     * A CONFIRMED booking is the thing worth confirming. There is no payment to
+     * wait for — a booking is CONFIRMED the moment it is created — so the only
+     * state that must never reach the client's inbox is a cancelled one.
      */
-    if (booking.paidAt === null) {
-      console.error(`${LOG} booking=${bookingId} is not paid; refusing to fulfil`)
+    if (booking.status === 'CANCELLED') {
+      console.error(`${LOG} booking=${bookingId} is cancelled; refusing to fulfil`)
       return
     }
-
-    /**
-     * Invoice first: the confirmation email carries the number.
-     *
-     * The invoice is claimed even when the confirmation is withheld. The money
-     * moved, so the GST liability exists and a serial must be allotted — the
-     * open question is what to tell the customer, not whether tax is due.
-     */
-    const invoiceNumber = await claimInvoice(bookingId)
 
     /**
      * Meeting link BEFORE the confirmation, because the confirmation carries it.
@@ -495,27 +439,25 @@ export async function fulfilBooking(
 
     await runStep(bookingId, 'confirmation', async () => {
       if (opts.hold !== undefined) {
-        // Something is wrong enough that auto-confirming would be a lie: the
-        // slot was resold, or the gateway's amount disagrees with what we
-        // priced. The owner alert still fires, and the booking is flagged in
-        // the admin. The confirmation claim is deliberately left unspent so the
-        // message can still go out once the human has sorted it out.
-        logConfirmationUnsent(
-          bookingId,
-          'withheld',
-          `${opts.hold.reason}. Invoice ${invoiceNumber ?? '(not allotted)'} issued; needs a human.`,
-        )
+        // Something is wrong enough that auto-confirming would be a lie — the
+        // session was taken from under us, say. The owner alert still fires and
+        // the booking is visible in the admin. The confirmation claim is
+        // deliberately left unspent so the message can still go out once the
+        // human has sorted it out.
+        logConfirmationUnsent(bookingId, 'withheld', `${opts.hold.reason}. Needs a human.`)
         return
       }
-      await deliverConfirmation(booking, invoiceNumber)
+      // The row was read before the meeting link was minted, so hand the fresh
+      // link to the template rather than the stale column.
+      await deliverConfirmation({ ...booking, meetingUrl })
     })
 
     // Independent claim and independent blast radius, so neither a withheld nor
     // an exploding confirmation can suppress the alert.
     await runStep(bookingId, 'owner-alert', () => sendOwnerAlert(booking))
   } catch (error) {
-    // The payment already succeeded. Whatever went wrong here, it does not get
-    // to fail the caller's request. Alert on this line.
+    // The client has already been told they are booked. Whatever went wrong
+    // here, it does not get to fail the caller's request. Alert on this line.
     console.error(`${LOG} booking=${bookingId} UNEXPECTED fulfilment failure`, error)
   }
 }
@@ -531,12 +473,11 @@ export async function fulfilBooking(
  * makes CONFIRMATION_UNSENT an alert a human has to act on rather than a
  * warning that clears itself.
  *
- * Idempotent. It claims the invoice number if one is still missing (that call
- * is itself idempotent), and then respects the same one-shot claim as the
- * automatic path: if the confirmation has already been claimed — because it was
- * sent, or because its fate is unknown — this reports 'already-claimed' and
- * sends nothing, however many times it is called. The stable idempotency key
- * means even Resend would refuse to deliver a second copy.
+ * Idempotent. It respects the same one-shot claim as the automatic path: if the
+ * confirmation has already been claimed — because it was sent, or because its
+ * fate is unknown — this reports 'already-claimed' and sends nothing, however
+ * many times it is called. The stable idempotency key means even Resend would
+ * refuse to deliver a second copy.
  *
  * { force: true } is the human override, for when someone has established that
  * the client really did receive nothing: it clears the claim and sends without
@@ -555,17 +496,19 @@ export async function resendConfirmation(
 
     if (booking === null) {
       console.error(`${LOG} booking=${bookingId} not found; cannot resend the confirmation`)
-      return { status: 'booking-not-found', invoiceNumber: null }
+      return { status: 'booking-not-found' }
     }
 
-    if (booking.paidAt === null) {
-      console.error(`${LOG} booking=${bookingId} is not paid; refusing to resend the confirmation`)
-      return { status: 'not-paid', invoiceNumber: booking.invoiceNumber }
+    if (booking.status === 'CANCELLED') {
+      console.error(
+        `${LOG} booking=${bookingId} is cancelled; refusing to resend the confirmation`,
+      )
+      return { status: 'cancelled' }
     }
 
-    // A confirmation held because the serial could not be allotted is the main
-    // reason this function is called, so try to allot it again first.
-    const invoiceNumber = booking.invoiceNumber ?? (await claimInvoice(bookingId))
+    // A confirmation is worth very little without a link, and the usual reason
+    // for calling this is that Google was down the first time round.
+    const meetingUrl = booking.meetingUrl ?? (await claimMeeting(booking))
 
     if (opts.force === true) {
       /**
@@ -580,12 +523,11 @@ export async function resendConfirmation(
     }
 
     const status = await deliverConfirmation(
-      booking,
-      invoiceNumber,
+      { ...booking, meetingUrl },
       opts.force === true ? { force: true } : {},
     )
     console.info(`${LOG} booking=${bookingId} resendConfirmation → ${status}`)
-    return { status, invoiceNumber }
+    return { status }
   } catch (error) {
     /**
      * 'unknown', not 'failed': this can only be reached after the claim may
@@ -594,6 +536,6 @@ export async function resendConfirmation(
      * forcing a duplicate.
      */
     console.error(`${LOG} booking=${bookingId} UNEXPECTED resendConfirmation failure`, error)
-    return { status: 'unknown', invoiceNumber: null }
+    return { status: 'unknown' }
   }
 }

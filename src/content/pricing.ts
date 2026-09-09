@@ -3,8 +3,8 @@
  *
  * NOTE: `fee` here is marketing copy for the RETAINER tiers, which are quoted
  * per client and never transacted on the site. It is deliberately a string and
- * carries no amount. The only prices this app charges are the paid consultations
- * in src/content/consultations.ts, which are integer paise.
+ * carries no amount — this app takes no payment of any kind, and every CTA
+ * below is an in-page anchor to the contact form. Booking a call is free.
  */
 
 import type { ButtonVariant } from './nav'
@@ -35,7 +35,7 @@ export type Pricing = {
 export const pricing = {
   kicker: 'Engagements',
   heading: 'Start with one function, or hand over the whole stack.',
-  sub: 'Every engagement is scoped to your team — these are starting points, not fixed packages.',
+  sub: 'Every engagement is scoped to your team — these are starting points, not fixed packages. Working out which one fits costs nothing.',
   tiers: [
     {
       name: 'Growth Sprint',

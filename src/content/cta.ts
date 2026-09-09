@@ -3,9 +3,9 @@
  * the contact endpoints are read from siteConfig so there is exactly one
  * source of truth for the email address and the WhatsApp number.
  *
- * The third action (the paid consultation) is not in the source markup — it
- * was added deliberately during the conversion. It lives here rather than in
- * the component so that no user-facing string is hardcoded in JSX.
+ * The third action (booking a call) is not in the source markup — it was added
+ * deliberately during the conversion. It lives here rather than in the
+ * component so that no user-facing string is hardcoded in JSX.
  */
 
 import { siteConfig } from '@/config/site'
@@ -27,7 +27,7 @@ export type FinalCta = {
 export const finalCta: FinalCta = {
   kicker: "Let's talk",
   heading: "Let's build your growth engine.",
-  body: "Bring us one broken function or your whole marketing operation — we'll tell you honestly where to start on the call.",
+  body: "Bring us one broken function or your whole marketing operation — we'll tell you honestly where to start on the call. It costs nothing to have it.",
   actions: [
     {
       label: `Email ${siteConfig.contact.email}`,
@@ -40,8 +40,8 @@ export const finalCta: FinalCta = {
       variant: 'ghost',
     },
     {
-      label: 'Book a paid consultation',
-      href: '/consultation',
+      label: 'Book a free call',
+      href: '/book',
       variant: 'ghost',
     },
   ],

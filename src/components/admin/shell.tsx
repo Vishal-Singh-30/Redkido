@@ -5,7 +5,7 @@
  * user-facing string — copy belongs to one module per surface. src/content/*.ts
  * is the marketing surface and is owned elsewhere; the admin area is internal
  * back-office copy and owns this module. Every admin page, chart and action
- * message reads from `adminCopy`. Nothing below this constant may contain a
+ * message reads from `adminCopy`. Nothing below that constant may contain a
  * literal that a human reads.
  *
  * Everything in this file is a server component. The one piece of state the
@@ -21,29 +21,44 @@ import { siteConfig } from '@/config/site'
 /* ==========================================================================
    Enum value lists.
 
-   Declared as literal tuples rather than imported from the generated Prisma
-   enums so that filter <select> options, badge maps and zod schemas all read
-   from one list. The literals are structurally identical to the Prisma string
-   unions, so they assign into `where` clauses without a cast.
+   Each list is `satisfies readonly <PrismaEnum>[]`, so the array is checked
+   against the schema rather than merely resembling it, and every label map
+   below is `satisfies Record<Enum, string>`. Adding or removing an enum member
+   in prisma/schema.prisma then breaks the BUILD here instead of rendering
+   `undefined` into a table cell.
+
+   This is not theoretical. HELD was caught this way when it was added, and
+   caught again — along with CONSULTATION and the four payment booking states —
+   when calls became free and those members went away.
    ========================================================================== */
 
-export const LEAD_KINDS = ['ENQUIRY', 'CONSULTATION'] as const
+export const LEAD_KINDS = ['ENQUIRY', 'CALL'] as const satisfies readonly LeadKind[]
 export type LeadKindValue = LeadKind
 
-export const LEAD_STATUSES = ['NEW', 'CONTACTED', 'QUALIFIED', 'WON', 'LOST'] as const satisfies readonly LeadStatus[]
+export const LEAD_STATUSES = [
+  'NEW',
+  'CONTACTED',
+  'QUALIFIED',
+  'WON',
+  'LOST',
+] as const satisfies readonly LeadStatus[]
 export type LeadStatusValue = LeadStatus
 
-export const BOOKING_STATUSES = ['PENDING', 'PAID', 'FAILED', 'CANCELLED', 'REFUNDED'] as const satisfies readonly BookingStatus[]
+/**
+ * No PENDING and no payment states. A free call is confirmed the moment it is
+ * booked, so the lifecycle is only ever "what happened on the day".
+ */
+export const BOOKING_STATUSES = [
+  'CONFIRMED',
+  'CANCELLED',
+  'COMPLETED',
+  'NO_SHOW',
+] as const satisfies readonly BookingStatus[]
 export type BookingStatusValue = BookingStatus
 
-// Derived from the Prisma enums rather than retyped. These arrays exist because
-// the filter UI needs something iterable, but the *types* come from the schema,
-// so adding an enum member breaks the label maps below at compile time instead
-// of silently rendering `undefined` in the admin. (HELD was added exactly this
-// way and this is how it was caught.)
+/** HELD went with checkout: nothing reserves a session before it is taken. */
 export const SLOT_STATUSES = [
   'AVAILABLE',
-  'HELD',
   'BOOKED',
   'BLOCKED',
 ] as const satisfies readonly SlotStatus[]
@@ -70,12 +85,26 @@ export const SETTING_KEYS = {
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS]
 
 /* ==========================================================================
-   Formatting. Bookings are Indian consultations billed under Indian GST, so
-   the admin reads every timestamp in IST regardless of where the lambda runs.
+   Time.
+
+   Sessions are published in the supplier's working day, which is Indian, and
+   read by an admin who may be anywhere. So every formatter below names its
+   timeZone explicitly and NOTHING here reads the server's local zone — a
+   Vercel lambda runs in UTC, and a 9pm IST session grouped by the server's
+   local date lands on the wrong day.
    ========================================================================== */
 
 export const ADMIN_LOCALE = 'en-IN'
 export const ADMIN_TIME_ZONE = 'Asia/Kolkata'
+
+/**
+ * Asia/Kolkata is a FIXED +05:30 — India has had no daylight saving since
+ * 1945 — which is why a literal offset is safe here. It is used in one
+ * direction only: turning a calendar date plus a wall-clock time typed by an
+ * admin into an instant. Everything that DISPLAYS a time goes through Intl
+ * with the zone named above.
+ */
+export const ADMIN_UTC_OFFSET = '+05:30'
 
 const dateTimeFormatter = new Intl.DateTimeFormat(ADMIN_LOCALE, {
   timeZone: ADMIN_TIME_ZONE,
@@ -94,10 +123,32 @@ const dateFormatter = new Intl.DateTimeFormat(ADMIN_LOCALE, {
   year: 'numeric',
 })
 
-const shortDayFormatter = new Intl.DateTimeFormat(ADMIN_LOCALE, {
-  timeZone: 'UTC',
+const dayHeadingFormatter = new Intl.DateTimeFormat(ADMIN_LOCALE, {
+  timeZone: ADMIN_TIME_ZONE,
+  weekday: 'long',
+  day: 'numeric',
+  month: 'long',
+  year: 'numeric',
+})
+
+const dayBucketFormatter = new Intl.DateTimeFormat(ADMIN_LOCALE, {
+  timeZone: ADMIN_TIME_ZONE,
   day: 'numeric',
   month: 'short',
+})
+
+const timeFormatter = new Intl.DateTimeFormat(ADMIN_LOCALE, {
+  timeZone: ADMIN_TIME_ZONE,
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: true,
+})
+
+const dayKeyFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: ADMIN_TIME_ZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
 })
 
 export function formatDateTime(value: Date | null | undefined): string {
@@ -110,9 +161,62 @@ export function formatDate(value: Date | null | undefined): string {
   return dateFormatter.format(value)
 }
 
-/** Axis label for a day bucket. Buckets are UTC days, so the formatter is too. */
-export function formatDayBucket(value: Date): string {
-  return shortDayFormatter.format(value)
+export function formatTime(value: Date | null | undefined): string {
+  if (!value) return adminCopy.common.empty
+  return timeFormatter.format(value)
+}
+
+/** "11:00 am – 11:30 am", in IST, for one session row. */
+export function formatTimeRange(startsAt: Date, endsAt: Date): string {
+  return timeFormatter.formatRange(startsAt, endsAt)
+}
+
+/**
+ * The IST calendar day an instant falls on, as YYYY-MM-DD.
+ *
+ * Assembled from formatToParts rather than trusting a locale that happens to
+ * emit ISO order today, so the shape cannot drift with the ICU data a runtime
+ * ships.
+ */
+export function istDayKey(value: Date): string {
+  const parts = dayKeyFormatter.formatToParts(value)
+  const get = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((part) => part.type === type)?.value ?? ''
+  return `${get('year')}-${get('month')}-${get('day')}`
+}
+
+/**
+ * The instant at which an IST wall-clock time on an IST calendar date occurs,
+ * or null if that is not a real date/time.
+ *
+ * The null case matters: a hand-typed "2026-02-30" does not throw, it rolls
+ * forward to 2 March, and a silently shifted session is worse than a rejected
+ * one. The round-trip check below catches exactly that.
+ */
+export function istInstant(dayKey: string, time: string): Date | null {
+  const parsed = new Date(`${dayKey}T${time}:00.000${ADMIN_UTC_OFFSET}`)
+  if (Number.isNaN(parsed.getTime())) return null
+  if (istDayKey(parsed) !== dayKey) return null
+  return parsed
+}
+
+/** Midnight IST at the start of an IST calendar day, or null if unparseable. */
+export function istDayStart(dayKey: string): Date | null {
+  return istInstant(dayKey, '00:00')
+}
+
+/** "Tuesday, 9 September 2026" — the heading over one day of sessions. */
+export function formatDayHeading(dayKey: string): string {
+  const instant = istInstant(dayKey, '12:00')
+  if (!instant) return dayKey
+  return dayHeadingFormatter.format(instant)
+}
+
+/** Axis label for one day bucket on a chart. Buckets are IST days. */
+export function formatDayBucket(dayKey: string): string {
+  const instant = istInstant(dayKey, '12:00')
+  if (!instant) return dayKey
+  return dayBucketFormatter.format(instant)
 }
 
 export function formatText(value: string | null | undefined): string {
@@ -136,6 +240,7 @@ export const adminCopy = {
 
   nav: [
     { href: '/admin', label: 'Dashboard', exact: true },
+    { href: '/admin/sessions', label: 'Sessions', exact: false },
     { href: '/admin/leads', label: 'Leads', exact: false },
     { href: '/admin/settings', label: 'Settings', exact: false },
   ],
@@ -147,7 +252,7 @@ export const adminCopy = {
     apply: 'Apply filters',
     reset: 'Clear',
     back: 'Back to leads',
-    copyHint: 'All timestamps are shown in India Standard Time (IST).',
+    copyHint: 'All times are shown in India Standard Time (IST).',
     notFound: 'That record no longer exists.',
     genericError: 'Something went wrong. Nothing was saved.',
     validationError: 'Please check the highlighted fields and try again.',
@@ -155,7 +260,7 @@ export const adminCopy = {
 
   kindLabels: {
     ENQUIRY: 'Enquiry',
-    CONSULTATION: 'Consultation',
+    CALL: 'Call',
   } satisfies Record<LeadKindValue, string>,
 
   leadStatusLabels: {
@@ -167,16 +272,14 @@ export const adminCopy = {
   } satisfies Record<LeadStatusValue, string>,
 
   bookingStatusLabels: {
-    PENDING: 'Pending',
-    PAID: 'Paid',
-    FAILED: 'Failed',
+    CONFIRMED: 'Confirmed',
     CANCELLED: 'Cancelled',
-    REFUNDED: 'Refunded',
+    COMPLETED: 'Completed',
+    NO_SHOW: 'No-show',
   } satisfies Record<BookingStatusValue, string>,
 
   slotStatusLabels: {
-    AVAILABLE: 'Available',
-    HELD: 'Held — awaiting payment',
+    AVAILABLE: 'Open',
     BOOKED: 'Booked',
     BLOCKED: 'Blocked',
   } satisfies Record<SlotStatusValue, string>,
@@ -192,40 +295,141 @@ export const adminCopy = {
 
   dashboard: {
     title: 'Dashboard',
-    description: 'Both funnels at a glance. Revenue counts paid consultations only.',
+    description: 'Who reached out, and what is on the calendar.',
     tiles: {
       totalLeads: 'Total leads',
-      totalLeadsSub: 'Enquiries and consultations combined',
+      totalLeadsSub: 'Enquiries and booked calls combined',
       enquiries: 'Enquiries',
-      enquiriesSub: 'Contact-form funnel',
-      paidConsultations: 'Paid consultations',
-      paidConsultationsSub: 'Bookings with a settled payment',
-      revenue: 'Revenue',
-      revenueSub: 'Sum of paid bookings, tax inclusive',
+      enquiriesSub: 'Contact form, no call attached',
+      calls: 'Calls booked',
+      callsSub: 'Confirmed bookings, all time',
+      upcoming: 'Upcoming calls',
+      upcomingSub: 'Confirmed, in the next 7 days',
+      openSessions: 'Open sessions',
+      openSessionsSub: 'Published and still unbooked in the next 7 days',
     },
+    noSessions:
+      'There are no open sessions in the next 7 days, so nobody can book a call right now.',
+    noSessionsCta: 'Publish sessions',
     trend: {
       title: 'Last 30 days',
-      description: 'New leads against consultations that were paid for.',
-      chartLabel: 'Leads and paid bookings per day over the last 30 days',
+      description: 'New leads against the calls that were actually booked.',
+      chartLabel: 'Leads and booked calls per day over the last 30 days, IST',
       leadsSeries: 'Leads',
-      bookingsSeries: 'Paid bookings',
+      bookingsSeries: 'Calls booked',
     },
-    revenueByType: {
-      title: 'Revenue by consultation type',
-      description: 'Paid bookings only, grouped by the catalogue entry sold.',
-      chartLabel: 'Revenue in rupees by consultation type',
+    byKind: {
+      title: 'Leads by kind',
+      description: 'How the two funnels compare over all time.',
+      chartLabel: 'Number of leads by kind',
     },
     recent: {
       title: 'Recent activity',
-      description: 'The ten most recent leads across both funnels.',
-      empty: 'No leads have come in yet.',
+      description: 'The ten most recent people who reached out.',
+      empty: 'Nobody has reached out yet.',
       view: 'Open',
+    },
+  },
+
+  sessions: {
+    title: 'Sessions',
+    description:
+      'Publish the times a visitor is allowed to book. A time that is not on this page cannot be booked.',
+    timezoneNote: 'Every time on this page is entered and shown in India Standard Time (IST).',
+
+    add: {
+      title: 'Add one session',
+      description: 'A single date and start time.',
+      dateLabel: 'Date',
+      timeLabel: 'Start time (IST)',
+      durationLabel: 'Length',
+      durationUnit: 'minutes',
+      labelLabel: 'Label',
+      labelOptional: 'optional',
+      labelPlaceholder: 'Intro call',
+      labelHelp: 'Shown to the visitor beside the time. Leave it blank for none.',
+      submit: 'Add session',
+    },
+
+    bulk: {
+      title: 'Add a date range',
+      description:
+        'Pick the weekdays, the start times and a range of dates, and every matching session is published in one go.',
+      fromLabel: 'From date',
+      toLabel: 'To date',
+      weekdaysLabel: 'Weekdays',
+      timesLabel: 'Start times (IST)',
+      timesPlaceholder: '11:00, 14:00, 16:00',
+      timesHelp: 'Comma separated, 24-hour clock. Up to 12 times per day.',
+      submit: 'Add sessions',
+      note: 'Times that already exist, and anything already in the past, are skipped rather than failing the whole batch.',
+    },
+
+    weekdayLabels: {
+      0: 'Sun',
+      1: 'Mon',
+      2: 'Tue',
+      3: 'Wed',
+      4: 'Thu',
+      5: 'Fri',
+      6: 'Sat',
+    } as Record<number, string>,
+
+    /** Display order, Monday first. Values are JS day-of-week numbers. */
+    weekdayOrder: [1, 2, 3, 4, 5, 6, 0] as readonly number[],
+    weekdayDefaults: [1, 2, 3, 4, 5] as readonly number[],
+
+    list: {
+      title: 'Upcoming sessions',
+      description: 'Grouped by IST date. Sessions that have already started are not listed.',
+      empty: 'No upcoming sessions. Publish some above, or the booking page has nothing to offer.',
+      truncated: 'Only the soonest sessions are listed. Publish fewer months at a time to see them all.',
+      columns: {
+        time: 'Time',
+        label: 'Label',
+        status: 'Status',
+        who: 'Booked by',
+        actions: 'Actions',
+      },
+      openLead: 'Open lead',
+      block: 'Block',
+      unblock: 'Reopen',
+      delete: 'Delete',
+      deleteLocked: 'Booked',
+      deleteLockedHint: 'A session with a confirmed booking cannot be deleted from here.',
+      countOne: 'session',
+      countMany: 'sessions',
+    },
+
+    notices: {
+      createdOne: 'Session added.',
+      createdManySuffix: 'sessions added.',
+      skippedSuffix: 'skipped — already published, or in the past.',
+      blocked: 'Session blocked. It will not appear on the booking page.',
+      unblocked: 'Session reopened.',
+      deleted: 'Session deleted.',
+    },
+
+    errors: {
+      invalid: 'Check the date, time and length, then try again.',
+      duplicate: 'There is already a session at that time.',
+      past: 'That start time has already passed.',
+      range: 'The end date must be on or after the start date.',
+      rangeTooLong: 'Pick a range of a year or less.',
+      weekdays: 'Pick at least one weekday.',
+      times: 'Enter start times as HH:MM on a 24-hour clock, separated by commas.',
+      tooMany: 'That would publish more than 500 sessions at once. Narrow the range.',
+      nothingCreated: 'Nothing to add — every one of those sessions already exists or has passed.',
+      booked: 'That session has a confirmed booking, so nothing was changed. Cancel the booking first.',
+      hasHistory: 'That session still has a booking attached to it. Block it instead of deleting it.',
+      notFound: 'That session no longer exists.',
+      generic: 'Something went wrong. Nothing was changed.',
     },
   },
 
   leads: {
     title: 'Leads',
-    description: 'One list for both funnels. The kind badge says which one.',
+    description: 'Everyone who reached out. The kind badge says whether they booked a call.',
     filters: {
       legend: 'Filter leads',
       kind: 'Kind',
@@ -241,7 +445,7 @@ export const adminCopy = {
       contact: 'Contact',
       company: 'Company',
       status: 'Status',
-      amount: 'Amount',
+      session: 'Session',
       created: 'Received',
       actions: '',
     },
@@ -262,10 +466,7 @@ export const adminCopy = {
     sections: {
       lead: 'Lead',
       manage: 'Status and notes',
-      booking: 'Consultation booking',
-      money: 'Amount breakdown',
-      tax: 'Place of supply (audit trail)',
-      payment: 'Payment and invoice',
+      booking: 'Booked call',
       emails: 'Email log',
     },
     fields: {
@@ -292,56 +493,18 @@ export const adminCopy = {
       error: 'Could not update this lead.',
     },
     booking: {
-      none: 'This is an enquiry, so it has no booking.',
+      none: 'This is an enquiry, so no call was booked.',
       status: 'Booking status',
-      type: 'Consultation type',
-      duration: 'Duration',
-      durationUnit: 'minutes',
-      slotStart: 'Slot starts',
-      slotEnd: 'Slot ends',
-      slotStatus: 'Slot status',
+      sessionDate: 'Date',
+      sessionTime: 'Time (IST)',
+      sessionLabel: 'Session label',
+      slotStatus: 'Session status',
       meetingUrl: 'Meeting link',
+      meetingUrlMissing: 'No meeting link has been attached to this booking yet.',
       rescheduleCount: 'Reschedules used',
       bookingId: 'Booking ID',
       createdAt: 'Booked at',
-    },
-    money: {
-      taxable: 'Taxable value',
-      cgst: 'CGST',
-      sgst: 'SGST',
-      igst: 'IGST',
-      total: 'Total charged',
-      gstRate: 'GST rate',
-      sacCode: 'SAC code',
-      inclusiveNote: 'Advertised prices include GST; the taxable value is back-computed from the total.',
-      invariant: 'Taxable + tax must equal the total. Any row where it does not is a bug, not a rounding artefact.',
-      invariantBroken: 'MISMATCH — taxable plus tax does not equal the total on this booking.',
-    },
-    tax: {
-      supplyType: 'Supply type',
-      interState: 'Inter-state (IGST)',
-      intraState: 'Intra-state (CGST + SGST)',
-      placeOfSupply: 'Place of supply (state code)',
-      clientState: 'Client state code',
-      clientGstin: 'Client GSTIN',
-      supplierState: 'Supplier state',
-      basis: 'Basis recorded at checkout',
-      basisRegistered:
-        'Recipient is GST-registered — place of supply is the location of the recipient. IGST Act s.12(2)(a).',
-      basisAddressOnRecord:
-        'Recipient is unregistered but an address was on record — place of supply is that address. IGST Act s.12(2)(b)(i).',
-      basisSupplierLocation:
-        'Recipient is unregistered with no address on record — place of supply falls back to the location of the supplier. IGST Act s.12(2)(b)(ii).',
-      derivedWarning:
-        'This basis line is derived from the columns stored on the booking at checkout, not from a stored sentence. The columns beside it are the primary record.',
-    },
-    payment: {
-      paidAt: 'Paid at',
-      invoiceNumber: 'Invoice number',
-      invoiceFy: 'Invoice financial year',
-      razorpayOrderId: 'Razorpay order ID',
-      razorpayPaymentId: 'Razorpay payment ID',
-      unpaid: 'No payment has settled against this booking.',
+      manageSessions: 'Manage sessions',
     },
     emails: {
       confirmation: 'Confirmation sent',
@@ -361,31 +524,11 @@ export const adminCopy = {
       error: 'Could not save settings.',
       meetingLinkLabel: 'Meeting link template',
       meetingLinkHelp:
-        'Sent in the confirmation email. Leave the booking placeholder in place if your conferencing tool needs a unique room per booking.',
+        'The fallback used when Google Meet could not attach a link. Leave the booking placeholder in place if your conferencing tool needs a unique room per booking.',
       meetingLinkPlaceholder: 'https://meet.example.com/redkido/{bookingId}',
       ownerAlertLabel: 'Owner alert recipient',
-      ownerAlertHelp: 'Every paid booking raises an internal alert to this address.',
+      ownerAlertHelp: 'Every booked call raises an internal alert to this address.',
       ownerAlertPlaceholder: siteConfig.contact.email,
-    },
-    gst: {
-      title: 'GST configuration (read only)',
-      description:
-        'These values come from src/config/site.ts and are deployed with the code, not editable here. They end up on every invoice.',
-      rate: 'GST rate',
-      sac: 'SAC code',
-      sacNote: 'SAC 9983 — other professional, technical and business services. Not 9996.',
-      supplierState: 'Supplier state',
-      supplierStateCode: 'Supplier state code',
-      supplierGstin: 'Supplier GSTIN',
-      gstinMissing: 'NOT SET',
-      registered: 'GST registered',
-      registeredYes: 'Yes',
-      registeredNo: 'No — no GST is charged',
-      pricesIncludeTax: 'Prices include tax',
-      invoicePrefix: 'Invoice prefix',
-      warningTitle: 'Before the first invoice',
-      warningBody:
-        'Place of supply for consultancy follows the general rule in IGST Act s.12(2): the location of the recipient when registered, the address on record when not, and the supplier location only when neither is known. The CA must confirm the supplier GSTIN above before a single invoice is issued.',
     },
   },
 
@@ -404,6 +547,30 @@ export const adminCopy = {
     fallbackError: 'Sign in failed. Try again.',
   },
 } as const
+
+/* ==========================================================================
+   Result codes for /admin/sessions.
+
+   The session actions report back through `?ok=` / `?error=` rather than
+   returned state, so the page stays a server component with no client-side
+   form state and a no-JS submit still lands on a message. The error codes ARE
+   the keys of adminCopy.sessions.errors, so an action cannot redirect with a
+   code that has no message — TypeScript refuses the literal.
+   ========================================================================== */
+
+export const SESSION_NOTICE_CODES = ['created', 'blocked', 'unblocked', 'deleted'] as const
+export type SessionNoticeCode = (typeof SESSION_NOTICE_CODES)[number]
+export type SessionErrorCode = keyof typeof adminCopy.sessions.errors
+
+export function isSessionNoticeCode(value: unknown): value is SessionNoticeCode {
+  return typeof value === 'string' && (SESSION_NOTICE_CODES as readonly string[]).includes(value)
+}
+
+export function isSessionErrorCode(value: unknown): value is SessionErrorCode {
+  // Object.hasOwn, not `in`: `'toString' in errors` is true and would render
+  // a function where a sentence belongs.
+  return typeof value === 'string' && Object.hasOwn(adminCopy.sessions.errors, value)
+}
 
 /* ==========================================================================
    Presentational primitives.
@@ -430,7 +597,7 @@ export function Badge({ tone = 'neutral', children }: { tone?: BadgeTone; childr
 }
 
 export function KindBadge({ kind }: { kind: LeadKindValue }) {
-  return <Badge tone={kind === 'CONSULTATION' ? 'accent' : 'neutral'}>{adminCopy.kindLabels[kind]}</Badge>
+  return <Badge tone={kind === 'CALL' ? 'accent' : 'neutral'}>{adminCopy.kindLabels[kind]}</Badge>
 }
 
 const leadStatusTone: Record<LeadStatusValue, BadgeTone> = {
@@ -446,15 +613,24 @@ export function LeadStatusBadge({ status }: { status: LeadStatusValue }) {
 }
 
 const bookingStatusTone: Record<BookingStatusValue, BadgeTone> = {
-  PENDING: 'warning',
-  PAID: 'positive',
-  FAILED: 'danger',
+  CONFIRMED: 'positive',
+  COMPLETED: 'accent',
   CANCELLED: 'neutral',
-  REFUNDED: 'neutral',
+  NO_SHOW: 'danger',
 }
 
 export function BookingStatusBadge({ status }: { status: BookingStatusValue }) {
   return <Badge tone={bookingStatusTone[status]}>{adminCopy.bookingStatusLabels[status]}</Badge>
+}
+
+const slotStatusTone: Record<SlotStatusValue, BadgeTone> = {
+  AVAILABLE: 'positive',
+  BOOKED: 'accent',
+  BLOCKED: 'neutral',
+}
+
+export function SlotStatusBadge({ status }: { status: SlotStatusValue }) {
+  return <Badge tone={slotStatusTone[status]}>{adminCopy.slotStatusLabels[status]}</Badge>
 }
 
 export function PageHeader({
@@ -536,6 +712,15 @@ export function DataRow({ label, value, wide = false }: { label: string; value: 
 export function DataGrid({ children }: { children: ReactNode }) {
   return <dl className="grid grid-cols-1 gap-x-6 gap-y-5 sm:grid-cols-2">{children}</dl>
 }
+
+/* Shared form classes, so every admin surface that renders an input agrees. */
+export const fieldClass =
+  'rounded-lg border border-line-strong bg-bg px-3 py-2 text-sm text-ink placeholder:text-muted-2'
+export const fieldLabelClass = 'text-xs font-semibold tracking-wide text-muted-2 uppercase'
+export const primaryButtonClass =
+  'rounded-full bg-red px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-2'
+export const quietButtonClass =
+  'rounded-full border border-line-strong px-3 py-1 text-xs font-semibold text-ink transition-colors hover:border-red hover:text-red'
 
 /* ==========================================================================
    The shell.
